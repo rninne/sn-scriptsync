@@ -54,6 +54,16 @@ export interface HttpServerState {
 /** How often the bridge re-asserts its port files (cheap stat + small read). */
 const PORT_FILE_HEARTBEAT_MS = 60_000;
 
+// Metadata-only traffic events — deliberately excludes params/result/content,
+// so a verbose traffic log can't dump script bodies, record payloads, or
+// tokens to a terminal/log file. onLog stays for free-text diagnostics; this
+// is for hosts (e.g. the standalone agent server) that want to render a
+// structured request/response stream.
+export type TrafficEvent =
+	| { type: 'request'; id: string; command: string; instance?: string }
+	| { type: 'response'; id: string; command: string; status: 'success' | 'error'; code?: string; durationMs: number }
+	| { type: 'unauthorized'; path: string };
+
 function readJsonBody(req: http.IncomingMessage): Promise<any> {
 	return new Promise((resolve, reject) => {
 		let size = 0;
@@ -171,9 +181,11 @@ export async function startAgentHttpServer(opts: {
 	/** The resolved ScriptSync sync folder. Reported in health and the port
 	 * descriptor so a second window can name which workspace owns the bridge. */
 	workspaceRoot?: string;
+	onTraffic?: (event: TrafficEvent) => void;
 }): Promise<HttpServerState> {
 	const token = crypto.randomBytes(16).toString('hex');
 	const log = opts.onLog || (() => { /* noop */ });
+	const traffic = opts.onTraffic || (() => { /* noop */ });
 	const startedAt = Date.now();
 
 	const server = http.createServer(async (req, res) => {
@@ -241,6 +253,7 @@ export async function startAgentHttpServer(opts: {
 			}
 
 			if (!authOk(req, token)) {
+				traffic({ type: 'unauthorized', path: url.pathname });
 				return sendJson(res, 401, {
 					status: 'error',
 					code: 'E_UNAUTHORIZED',
@@ -278,8 +291,12 @@ export async function startAgentHttpServer(opts: {
 				if (!body.id) body.id = `http_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
 				parsedRequestId = body.id;
 
+				const startedAt = Date.now();
+				traffic({ type: 'request', id: body.id, command: body.command, instance: body.instance });
+
 				const response: AgentResponse = await dispatchAgentCommand(body as AgentRequest);
 				const status = response.status === 'success' ? 200 : httpStatusForCode(response.code);
+				traffic({ type: 'response', id: response.id, command: response.command, status: response.status, code: response.code, durationMs: Date.now() - startedAt });
 				return sendJson(res, status, response);
 			}
 

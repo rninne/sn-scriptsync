@@ -42,8 +42,45 @@ import { setHeadlessWorkspaceRoot } from './workspaceRoot';
 import { setRuntime } from './agent/runtime';
 import * as pendingRegistry from './agent/pendingRegistry';
 import { setHeadlessSettings } from './agent/commands/_shared';
-import { startAgentHttpServer, stopAgentHttpServer, HttpServerState } from './agent/transport/http';
+import { startAgentHttpServer, stopAgentHttpServer, HttpServerState, TrafficEvent } from './agent/transport/http';
 import { AgentErrorCode } from './agent/errors';
+
+// --- Rich traffic log -------------------------------------------------------
+// Colorized, structured lines for every HTTP request/response and every
+// WS message to/from the SN Utils helper tab, so `--root ...` run in a
+// terminal reads as a live traffic stream. No dependency: plain ANSI codes,
+// disabled automatically when not a TTY or when NO_COLOR is set (output
+// piped to a file stays plain, per the usual CLI convention).
+const useColor = !!process.stdout.isTTY && !process.env.NO_COLOR;
+const ANSI = {
+	reset: '\x1b[0m', dim: '\x1b[2m', bold: '\x1b[1m',
+	green: '\x1b[32m', red: '\x1b[31m', yellow: '\x1b[33m', cyan: '\x1b[36m', magenta: '\x1b[35m',
+};
+function paint(code: string, text: string): string {
+	return useColor ? `${code}${text}${ANSI.reset}` : text;
+}
+function timestamp(): string {
+	return paint(ANSI.dim, new Date().toISOString().slice(11, 23));
+}
+
+function logHttpTraffic(event: TrafficEvent) {
+	if (event.type === 'request') {
+		console.log(`${timestamp()} ${paint(ANSI.cyan, '→ HTTP')}  ${event.command}${event.instance ? ` (${event.instance})` : ''}  ${paint(ANSI.dim, `id=${event.id}`)}`);
+	} else if (event.type === 'response') {
+		const ok = event.status === 'success';
+		const arrow = paint(ok ? ANSI.green : ANSI.red, `← HTTP  ${ok ? 'ok ' : (event.code || 'error')}`);
+		console.log(`${timestamp()} ${arrow}  ${event.command}  ${paint(ANSI.dim, `id=${event.id}  ${event.durationMs}ms`)}`);
+	} else {
+		console.log(`${timestamp()} ${paint(ANSI.yellow, '✕ HTTP  401 unauthorized')}  ${event.path}`);
+	}
+}
+
+function logWsTraffic(direction: '→' | '←', payload: any, extra?: string) {
+	const action = payload?.action || '(no action)';
+	const color = direction === '→' ? ANSI.cyan : ANSI.magenta;
+	const rid = payload?.agentRequestId ? paint(ANSI.dim, `rid=${payload.agentRequestId}`) : '';
+	console.log(`${timestamp()} ${paint(color, `${direction} WS   `)} ${action}  ${rid}${extra ? `  ${paint(ANSI.dim, extra)}` : ''}`);
+}
 
 interface CliOptions {
 	root: string;
@@ -105,6 +142,7 @@ async function main() {
 		if (typeof messageObj === 'object') {
 			messageObj.appName = messageObj.appName || 'sn-scriptsync-standalone-agent-server';
 		}
+		logWsTraffic('→', messageObj);
 		const message = JSON.stringify(messageObj);
 		wss.clients.forEach((client: any) => {
 			if (client.readyState === WebSocket.OPEN) {
@@ -144,8 +182,8 @@ async function main() {
 	});
 
 	wss.on('connection', (ws: any) => {
-		log('Helper tab connected.');
-		ws.on('close', () => log('Helper tab disconnected.'));
+		console.log(`${timestamp()} ${paint(ANSI.bold + ANSI.magenta, '● Helper tab connected')}`);
+		ws.on('close', () => console.log(`${timestamp()} ${paint(ANSI.magenta, '○ Helper tab disconnected')}`));
 		ws.on('error', (err: any) => log(`Helper tab socket error: ${err?.message || err}`));
 		ws.on('message', (raw: any) => {
 			let messageJson: any;
@@ -155,7 +193,10 @@ async function main() {
 				return;
 			}
 			if (messageJson?.agentRequestId) {
-				pendingRegistry.resolve(messageJson.agentRequestId, messageJson);
+				const matched = pendingRegistry.resolve(messageJson.agentRequestId, messageJson);
+				logWsTraffic('←', messageJson, matched ? undefined : 'unmatched — no pending request for this id');
+			} else {
+				logWsTraffic('←', messageJson);
 			}
 		});
 	});
@@ -163,7 +204,10 @@ async function main() {
 	// --- HTTP Agent API ---
 	let httpState: HttpServerState;
 	try {
-		httpState = await startAgentHttpServer({ onLog: (m) => log(`[agent-http] ${m}`) });
+		httpState = await startAgentHttpServer({
+			onLog: (m) => log(`[agent-http] ${m}`),
+			onTraffic: logHttpTraffic,
+		});
 	} catch (e: any) {
 		log(`Agent HTTP API failed to start: ${e?.message || e}`);
 		process.exit(1);
