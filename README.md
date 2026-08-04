@@ -83,6 +83,77 @@ curl -s -X POST http://127.0.0.1:$PORT/api \
 
 See [CHANGELOG.md](https://github.com/arnoudkooi/sn-scriptsync/blob/main/CHANGELOG.md) for the full list of changes.
 
+### 🖥️ Headless Agent Server (no VS Code required)
+
+The Agent API doesn't require VS Code to be running. `src/standaloneAgentServer.ts` is a plain Node.js host that runs just the two things AI agents actually need — the WebSocket relay to the SN Utils browser helper tab, and the HTTP Agent API — leaving out everything VS Code-specific (tree views, editor commands, the Pending Saves review queue). The wire protocol, command set, and `.vscode/sn-agent-port.json` discovery are unchanged, so anything written against the Agent API works identically against either host.
+
+The architecture is preserved as-is: the browser helper tab still holds the authenticated ServiceNow session and does the actual REST calls — this process is only a relay and command dispatcher, and never touches your ServiceNow credentials directly.
+
+**Build & run:**
+
+```bash
+npm run compile
+npm run agent-server -- --root /path/to/scriptsync-folder
+# or directly:
+node out/standaloneAgentServer.js --root /path/to/scriptsync-folder
+```
+
+`--root` is the sync folder — the one containing `<instance>/` subfolders with `_settings.json` (the same folder VS Code would sync into).
+
+**Options** (flag or environment variable):
+
+| Flag | Env var | Default | Description |
+|---|---|---|---|
+| `--root <path>` | `SN_AGENT_ROOT` | — (required) | Sync folder containing `<instance>/` subfolders |
+| `--ws-port <n>` | `SN_AGENT_WS_PORT` | `1978` | Port the SN Utils helper tab dials. Only one process can hold this port — stop any running VS Code window with sn-scriptsync enabled first, or pick a different port and reconfigure the browser side |
+| `--config <path>` | `SN_AGENT_CONFIG` | — | JSON file of the same permission-gate settings VS Code exposes (see below); omit any key to keep its VS Code default |
+
+Once running, open the SN Utils helper tab in your browser and connect via `/token`, exactly as you would for the VS Code extension. The HTTP Agent API's port and token are written to `.vscode/sn-agent-port.json` under `--root`, same as always:
+
+```bash
+PORT=$(jq -r .port  <root>/.vscode/sn-agent-port.json)
+TOKEN=$(jq -r .token <root>/.vscode/sn-agent-port.json)
+
+curl -s -X POST http://127.0.0.1:$PORT/api \
+  -H "Content-Type: application/json" \
+  -H "X-Agent-Token: $TOKEN" \
+  -d '{ "command": "check_connection" }'
+```
+
+**Permission-gate config file** (`--config settings.json`), mirroring the VS Code settings of the same name:
+
+```json
+{
+  "createArtifacts.enabled": true,
+  "restRequest.enabled": false,
+  "deleteRecords.enabled": false,
+  "backgroundScripts.enabled": false
+}
+```
+
+**Rich traffic log:** running in a terminal prints a live, colorized stream of every request — HTTP requests/responses (command, id, status/error code, duration) and every WebSocket message to/from the helper tab (action, correlation id, whether a response matched a pending request) — so you can watch traffic flow in real time:
+
+```
+11:43:08.331 → HTTP  check_connection  id=t6
+11:43:08.331 ← HTTP  ok   check_connection  id=t6  0ms
+11:43:08.357 → HTTP  query_records (dev12345)  id=t7
+11:43:08.358 → WS    agentQueryRecords  rid=agent_t7
+11:43:08.361 ← WS    agentQueryRecordsResponse  rid=agent_t7
+11:43:08.361 ← HTTP  ok   query_records  id=t7  4ms
+```
+
+Colors auto-disable when output isn't a TTY (e.g. piped to a file), so redirected logs stay plain text.
+
+**`refresh_scope` — reset local files to the instance baseline:** a drift-guard command available over the Agent API (not tied to any VS Code UI) that resets every locally synced file in a scope back to whatever's currently on the instance — a "clean slate" ritual you can run before or after agent work:
+
+```json
+{ "command": "refresh_scope", "params": { "scopeName": "x_app_scope" } }
+```
+
+See `agentrules/commands/refresh_scope.md` for parameters and the full response shape.
+
+**Not included headless:** the Pending Saves review queue and its tree view (`sn-scriptsync.agentApi.reviewWrites` has no effect — writes always go straight through), the legacy file-based Agent API transport, and anything editor-specific (auto-sync on save, context menu commands, IntelliSense). Every Agent API command, instance/scope resolution, and `_map.json` naming behaves identically to the VS Code extension.
+
 ### 🔒 Security Enhancements
 
 Comprehensive security measures protect your workspace and ServiceNow instance:
