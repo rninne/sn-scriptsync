@@ -230,6 +230,28 @@ async function refreshSessionToken(ctx: AgentContext, instance: any): Promise<an
 }
 
 /**
+ * Run an encoded-query list request through the browser helper (the same
+ * `agentQueryRecords` action query_records/get_parent_options use), returning
+ * the raw records array. Unlike restRequest(), the browser side for this
+ * action doesn't report a success/error envelope — callers get back whatever
+ * `records` came back (possibly empty).
+ */
+export async function queryRecords(ctx: AgentContext, instance: any, tableName: string, queryString: string): Promise<any[]> {
+	const correlationId = nextCorrelationId(ctx);
+	const pending = ctx.waitForBrowserResponse<any>(correlationId);
+	ctx.sendToBrowser({
+		action: 'agentQueryRecords',
+		agentRequestId: correlationId,
+		tableName,
+		queryString,
+		instance,
+		appName: 'VS Code',
+	});
+	const response = await pending;
+	return response?.records ?? [];
+}
+
+/**
  * Fetch a single record by sys_id. Returns the record object, or null when the
  * record does not exist (404). `fields` is a comma-separated sysparm_fields
  * list; omit for all fields.

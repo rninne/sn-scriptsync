@@ -142,7 +142,11 @@ const MANIFEST_OUTPUT = path.join(SKILLS_DIR, '_skills.json');
 //               createArtifacts, so an older helper that publishes only the
 //               five original gates still governs updates through the create
 //               grant instead of refusing them.
-const INSTRUCTIONS_VERSION = 23;
+//   v23 -> v24: new refresh_scope command — reset every locally synced file in
+//               a scope back to the instance's current values (the Agent API
+//               equivalent of VS Code's "Load/Refresh artifacts from scope"),
+//               useful as a drift-guard before/after agent work.
+const INSTRUCTIONS_VERSION = 24;
 
 // Marker that identifies a file as an extension-managed skill. The extension
 // only ever deletes files that carry this marker, so user-authored files in the
@@ -154,6 +158,7 @@ const SKILL_MARKER = `<!-- SN-SCRIPTSYNC:SKILL instructionsSchemaVersion=${INSTR
 // is also the canonical command order inside the skills that own them.
 const COMMAND_GROUPS: Array<{ label: string; cmds: string[] }> = [
 	{ label: 'Connection & state', cmds: ['check_connection', 'get_capabilities', 'get_review_result', 'list_instances', 'get_instance_info', 'get_sync_status', 'sync_now', 'get_last_error', 'clear_last_error'] },
+	{ label: 'Scope sync', cmds: ['refresh_scope'] },
 	{ label: 'Records — write', cmds: ['update_record', 'update_record_batch', 'create_record', 'create_artifact', 'delete_record'] },
 	{ label: 'Scoped-app ergonomics', cmds: ['create_application', 'create_table', 'add_column', 'delete_application'] },
 	{ label: 'Records — read', cmds: ['get_record', 'get_table_metadata', 'check_name_exists_remote', 'pull_records'] },
@@ -184,6 +189,7 @@ const EVERYDAY: Array<{ cmd: string; blurb: string }> = [
 	{ cmd: 'create_artifact', blurb: 'Create a scriptable artifact incl. config fields via payload (not loose files).' },
 	{ cmd: 'navigate_and_screenshot', blurb: 'Open a page and capture it in one call to verify state.' },
 	{ cmd: 'code_search', blurb: 'Find existing code across script tables — `term` required (Pro). See the snu-agent-api skill for params/response.' },
+	{ cmd: 'refresh_scope', blurb: 'Reset local files in a scope back to the instance\'s current values — a drift-guard reset ritual.' },
 ];
 
 // --- Skill definitions -------------------------------------------------------
