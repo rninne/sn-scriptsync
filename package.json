@@ -392,7 +392,8 @@
 		"release:openvsx": "node scripts/publish.mjs openvsx",
 		"release:npm": "node scripts/publish.mjs npm",
 		"release:all": "node scripts/publish.mjs all",
-		"watch": "tsc -watch -p ./"
+		"watch": "tsc -watch -p ./",
+		"agent-server": "node out/standaloneAgentServer.js"
 	},
 	"devDependencies": {
 		"@types/node": "^18.15.11",

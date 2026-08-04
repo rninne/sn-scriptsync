@@ -9,10 +9,20 @@
 // to the pending promise, so no browser changes are needed to add new commands.
 
 import * as path from 'path';
-import * as vscode from 'vscode';
 import { AgentContext } from '../types';
 import { AgentError, AgentErrorCode, inferCodeFromMessage } from '../errors';
 import { ExtensionUtils } from '../../ExtensionUtils';
+
+// `vscode` only resolves inside the extension host's module loader. Load it
+// lazily so this module also works under the standalone agent server
+// (src/standaloneAgentServer.ts), which supplies settings via
+// setHeadlessSettings() instead of VS Code configuration.
+let vscode: typeof import('vscode') | undefined;
+try {
+	vscode = require('vscode');
+} catch {
+	vscode = undefined;
+}
 
 const eu = new ExtensionUtils();
 
@@ -24,10 +34,26 @@ export function mustGetInstanceSettings(instanceFolder: string) {
 	return s;
 }
 
+// Headless equivalent of the sn-scriptsync VS Code settings (permission gates
+// etc). Keyed the same as package.json's `contributes.configuration`
+// properties, e.g. "createArtifacts.enabled". Empty by default, so getSetting()
+// falls back to each call-site's own `def` — which already mirrors the
+// package.json defaults, so an unconfigured standalone server behaves the
+// same as a fresh VS Code install.
+let headlessSettings: Record<string, any> = {};
+
+/** Headless host hook: supply the sn-scriptsync settings getSetting() reads. */
+export function setHeadlessSettings(settings: Record<string, any>): void {
+	headlessSettings = settings || {};
+}
+
 export function getSetting<T>(key: string, def: T): T {
-	const settings = vscode.workspace.getConfiguration('sn-scriptsync');
-	const v = settings.get(key);
-	return (v === undefined ? def : v) as T;
+	if (vscode) {
+		const settings = vscode.workspace.getConfiguration('sn-scriptsync');
+		const v = settings.get(key);
+		return (v === undefined ? def : v) as T;
+	}
+	return (Object.prototype.hasOwnProperty.call(headlessSettings, key) ? headlessSettings[key] : def) as T;
 }
 
 let restSeq = 0;

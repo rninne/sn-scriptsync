@@ -25,6 +25,9 @@ Thumbs.db
 # VS Code extension packaging
 *.vsix
 
+# Packed npm tarballs
+*.tgz
+
 # IDE
 .vscode-test/
 .idea/

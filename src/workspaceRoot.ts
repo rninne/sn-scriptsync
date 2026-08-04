@@ -1,6 +1,16 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import * as vscode from 'vscode';
+
+// `vscode` only resolves inside the extension host's module loader. Load it
+// lazily so this module can also be imported by the standalone agent server
+// (src/standaloneAgentServer.ts), which runs as a plain Node process and
+// supplies the root via setHeadlessWorkspaceRoot() instead.
+let vscode: typeof import('vscode') | undefined;
+try {
+	vscode = require('vscode');
+} catch {
+	vscode = undefined;
+}
 
 // Single source of truth for "which workspace folder does ScriptSync sync into".
 //
@@ -35,6 +45,17 @@ let resolved = false;
 // The remembered pick (fsPath). Hydrated from workspace state by extension.ts.
 let rememberedRoot: string | undefined;
 
+// Set by the standalone agent server (src/standaloneAgentServer.ts), which has
+// no `vscode.workspace` to resolve against — it's just a configured directory.
+// When set, getWorkspaceRoot() returns it directly without touching `vscode`.
+let headlessRoot: string | undefined;
+
+/** Headless host hook: pin the workspace root directly, bypassing vscode.workspace resolution entirely. */
+export function setHeadlessWorkspaceRoot(root: string): void {
+	headlessRoot = root;
+	resetWorkspaceRoot();
+}
+
 export interface SyncFolderCandidate {
 	path: string;
 	name: string;
@@ -43,7 +64,7 @@ export interface SyncFolderCandidate {
 }
 
 function getConfiguredSyncDirName(): string {
-	let syncDir = vscode.workspace.getConfiguration('sn-scriptsync').get<string>('path') || 'scriptsync';
+	let syncDir = vscode!.workspace.getConfiguration('sn-scriptsync').get<string>('path') || 'scriptsync';
 	syncDir = syncDir.replace('~', '');
 	if (path.sep === '\\') {
 		syncDir = syncDir.replace(/\//g, '\\');
@@ -82,7 +103,7 @@ function isEmptyFolder(folder: string): boolean {
 
 /** Open folders, deduped to fsPaths. */
 function workspaceFolderPaths(): string[] {
-	return (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath);
+	return (vscode!.workspace.workspaceFolders || []).map((f) => f.uri.fsPath);
 }
 
 /**
@@ -111,10 +132,10 @@ export function getSyncFolderCandidates(): SyncFolderCandidate[] {
 }
 
 function resolveWorkspaceRoot(): string | undefined {
-	const folders = vscode.workspace.workspaceFolders;
+	const folders = vscode!.workspace.workspaceFolders;
 
 	if (!folders || folders.length === 0) {
-		return vscode.workspace.rootPath || undefined;
+		return vscode!.workspace.rootPath || undefined;
 	}
 	if (folders.length === 1) {
 		return folders[0].uri.fsPath;
@@ -140,6 +161,7 @@ function resolveWorkspaceRoot(): string | undefined {
  * onDidChangeWorkspaceFolders / config changes) when inputs change.
  */
 export function getWorkspaceRoot(): string | undefined {
+	if (headlessRoot) return headlessRoot;
 	if (!resolved) {
 		cachedRoot = resolveWorkspaceRoot();
 		resolved = true;
@@ -161,7 +183,7 @@ export function setRememberedWorkspaceRoot(fsPath: string | undefined): void {
 
 /** True when there is more than one open folder. */
 export function isMultiRootWorkspace(): boolean {
-	return (vscode.workspace.workspaceFolders?.length || 0) > 1;
+	return (vscode!.workspace.workspaceFolders?.length || 0) > 1;
 }
 
 /**

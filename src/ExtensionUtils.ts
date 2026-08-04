@@ -1,10 +1,21 @@
-import { window, workspace, commands, Disposable, ExtensionContext, StatusBarAlignment, StatusBarItem, TextDocument } from 'vscode';
+import type { TextDocument } from 'vscode';
 
 import * as path from "path";
-import * as vscode from "vscode";
 import { open } from 'fs';
 import { Constants } from "./constants";
 import { getWorkspaceRoot, assertPathUnderRoot } from "./workspaceRoot";
+
+// `vscode` only resolves inside the extension host's module loader. Load it
+// lazily so this class can also be used by the standalone agent server
+// (src/standaloneAgentServer.ts), which runs as a plain Node process. The few
+// call-sites below that touch `vscode` are editor UI conveniences (open the
+// file, show a toast) and are no-ops headless.
+let vscode: typeof import('vscode') | undefined;
+try {
+	vscode = require('vscode');
+} catch {
+	vscode = undefined;
+}
 
 let idx = 0;
 
@@ -483,6 +494,7 @@ export class ExtensionUtils {
     }
 
     showMessage(msg: string, duration: number = 3000) {
+        if (!vscode) return;
         vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
@@ -554,7 +566,11 @@ export class ExtensionUtils {
 
 
         if (fileNameArr.length < 5) {
-            vscode.window.showWarningMessage("This command can only be executed from a synced file.")
+            if (vscode) {
+                vscode.window.showWarningMessage("This command can only be executed from a synced file.")
+            } else {
+                console.warn("This command can only be executed from a synced file.");
+            }
             return true;
         }
 
