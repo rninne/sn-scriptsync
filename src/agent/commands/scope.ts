@@ -29,6 +29,44 @@ import { mustGetInstanceSettings, queryRecords } from './_shared';
 
 const eu = new ExtensionUtils();
 
+// A single sysparm_limit query silently truncates large scopes — confirmed
+// live against a real UI Builder app scope, where sys_ux_* records (which
+// sort ahead of sys_script_include etc. under ORDERBYDESCsys_class_name)
+// consumed the entire cap before the listing ever reached a code-bearing
+// table, reporting a false "no code-bearing tables found". Paginate via
+// sysparm_offset instead of relying on one capped request. ORDERBYsys_id
+// (not the original's ORDERBYDESCsys_class_name) gives pagination a stable,
+// unique sort — required for offset-based paging to not skip/duplicate rows.
+// `extraParams` are flat sysparm_* params (e.g. sysparm_no_count) appended
+// after the query clause — never mixed into `query` itself.
+async function queryAllRecords(
+	ctx: AgentContext,
+	instance: any,
+	tableName: string,
+	opts: { fields: string; query: string; extraParams?: string },
+	pageSize: number,
+	maxRecords: number,
+): Promise<{ records: any[]; truncated: boolean }> {
+	const records: any[] = [];
+	let offset = 0;
+	while (true) {
+		const queryString =
+			`sysparm_fields=${opts.fields}` +
+			`&sysparm_query=${opts.query}^ORDERBYsys_id` +
+			`&sysparm_limit=${pageSize}&sysparm_offset=${offset}` +
+			(opts.extraParams ? `&${opts.extraParams}` : '');
+		const page = await queryRecords(ctx, instance, tableName, queryString);
+		records.push(...page);
+		if (page.length < pageSize) {
+			return { records, truncated: false };
+		}
+		offset += pageSize;
+		if (records.length >= maxRecords) {
+			return { records, truncated: true };
+		}
+	}
+}
+
 interface TableFieldConfig {
 	label?: string;
 	group?: string;
@@ -82,7 +120,8 @@ function deriveFileExtension(fieldType: string, fieldName: string): string {
 	return ext;
 }
 
-const TABLE_QUERY_LIMIT = 200;
+const TABLE_PAGE_SIZE = 200;
+const TABLE_MAX_RECORDS = 20_000;
 
 interface TableRefreshResult {
 	table: string;
@@ -105,13 +144,18 @@ async function refreshTable(
 		return { table, records: 0, filesWritten: 0, truncated: false };
 	}
 
-	const queryString =
-		`sysparm_fields=sys_name,sys_id,${codeFields.join(',')}` +
-		`&sysparm_query=sys_scope=${scope}^sys_class_name=${table}` +
-		`&sysparm_exclude_reference_link=true&sysparm_no_count=true&sysparm_limit=${TABLE_QUERY_LIMIT}`;
-
-	const records: any[] = await queryRecords(ctx, instance, table, queryString);
-	const truncated = records.length === TABLE_QUERY_LIMIT;
+	const { records, truncated } = await queryAllRecords(
+		ctx,
+		instance,
+		table,
+		{
+			fields: `sys_name,sys_id,${codeFields.join(',')}`,
+			query: `sys_scope=${scope}^sys_class_name=${table}`,
+			extraParams: 'sysparm_exclude_reference_link=true&sysparm_no_count=true',
+		},
+		TABLE_PAGE_SIZE,
+		TABLE_MAX_RECORDS,
+	);
 
 	const isFolderRecordTable = Constants.FOLDERRECORDTABLES.includes(table);
 	const separator = isFolderRecordTable ? path.sep : '.';
@@ -168,7 +212,8 @@ async function refreshTable(
 	return { table, records: records.length, filesWritten: writes.length, truncated };
 }
 
-const META_QUERY_LIMIT = 2000;
+const META_PAGE_SIZE = 1000;
+const META_MAX_RECORDS = 50_000;
 
 const refresh_scope: CommandHandler = {
 	name: 'refresh_scope',
@@ -186,7 +231,7 @@ const refresh_scope: CommandHandler = {
 				tables: [{ table: 'sys_script_include', records: 4, filesWritten: 4 }],
 			},
 		},
-		notes: 'scopeName is the folder name under the instance (e.g. "global" or your app scope\'s folder). Omit it when the instance has exactly one scope folder — it\'s inferred; otherwise it\'s required. `includeEmpty` (default false) also writes empty code fields, matching the VS Code "include empty" variant of Load/Refresh Scope. Table listing is capped at 2000 records and each table\'s field fetch at 200 records; a `truncatedTables`/`truncated` flag on the response means a scope is larger than that and some files may be missing — re-run is not sufficient, this needs pagination support to fully cover it.',
+		notes: 'scopeName is the folder name under the instance (e.g. "global" or your app scope\'s folder). Omit it when the instance has exactly one scope folder — it\'s inferred; otherwise it\'s required. `includeEmpty` (default false) also writes empty code fields, matching the VS Code "include empty" variant of Load/Refresh Scope. Both the scope listing and each table\'s field fetch are paginated (1000/page and 200/page respectively) rather than capped at a single request, up to a 50,000/20,000-record safety ceiling per scope/table; a `scopeListingTruncated`/`truncatedTables` flag on the response means even that ceiling was hit and results may still be incomplete.',
 	},
 	async handle(ctx, params) {
 		const includeEmpty = !!params?.includeEmpty;
@@ -220,12 +265,19 @@ const refresh_scope: CommandHandler = {
 		const relations = loadMetaDataRelations();
 
 		// Stage 1: what exists in this scope.
-		const metaQuery =
-			'sysparm_fields=sys_class_name,sys_name,sys_id,sys_updated_on' +
-			`&sysparm_query=sys_scope=${scope}^sys_class_name!=sys_metadata_delete^sys_update_name!=NULL^ORDERBYDESCsys_class_name` +
-			`&sysparm_no_count=true&sysparm_limit=${META_QUERY_LIMIT}`;
-		const metaRecords: any[] = await queryRecords(ctx, instance, 'sys_metadata', metaQuery);
-		ctx.log(`refresh_scope: ${metaRecords.length} record(s) in scope "${scopeName}"`);
+		const { records: metaRecords, truncated: metaTruncated } = await queryAllRecords(
+			ctx,
+			instance,
+			'sys_metadata',
+			{
+				fields: 'sys_class_name,sys_name,sys_id,sys_updated_on',
+				query: `sys_scope=${scope}^sys_class_name!=sys_metadata_delete^sys_update_name!=NULL`,
+				extraParams: 'sysparm_no_count=true',
+			},
+			META_PAGE_SIZE,
+			META_MAX_RECORDS,
+		);
+		ctx.log(`refresh_scope: ${metaRecords.length} record(s) in scope "${scopeName}"${metaTruncated ? ' (hit safety ceiling, likely incomplete)' : ''}`);
 
 		const tablesInScope = [...new Set(metaRecords.map((r: any) => String(r.sys_class_name)))];
 		const codeTables = tablesInScope.filter((t) => relations.tableFields[t]?.codeFields);
@@ -236,8 +288,8 @@ const refresh_scope: CommandHandler = {
 				scope,
 				tablesRefreshed: 0,
 				filesWritten: 0,
-				message: metaRecords.length === META_QUERY_LIMIT
-					? `Scope listing hit the ${META_QUERY_LIMIT}-record cap and may be incomplete, but no code-bearing tables were found in what was returned.`
+				message: metaTruncated
+					? `Scope listing hit the ${META_MAX_RECORDS}-record safety ceiling and may be incomplete, but no code-bearing tables were found in what was returned.`
 					: 'No code-bearing tables found in this scope — nothing to refresh.',
 			};
 		}
@@ -251,10 +303,10 @@ const refresh_scope: CommandHandler = {
 		const filesWritten = results.reduce((sum, r) => sum + r.filesWritten, 0);
 		const truncatedTables = results.filter((r) => r.truncated).map((r) => r.table);
 		if (truncatedTables.length) {
-			ctx.log(`refresh_scope: table(s) hit the ${TABLE_QUERY_LIMIT}-record limit, results may be incomplete: ${truncatedTables.join(', ')}`);
+			ctx.log(`refresh_scope: table(s) hit the ${TABLE_MAX_RECORDS}-record safety ceiling, results may be incomplete: ${truncatedTables.join(', ')}`);
 		}
-		if (metaRecords.length === META_QUERY_LIMIT) {
-			ctx.log(`refresh_scope: scope listing hit the ${META_QUERY_LIMIT}-record cap — some tables may be missing entirely.`);
+		if (metaTruncated) {
+			ctx.log(`refresh_scope: scope listing hit the ${META_MAX_RECORDS}-record safety ceiling — some tables may be missing entirely.`);
 		}
 
 		return {
@@ -264,7 +316,7 @@ const refresh_scope: CommandHandler = {
 			filesWritten,
 			tables: results.map((r) => ({ table: r.table, records: r.records, filesWritten: r.filesWritten })),
 			...(truncatedTables.length ? { truncatedTables } : {}),
-			...(metaRecords.length === META_QUERY_LIMIT ? { scopeListingTruncated: true } : {}),
+			...(metaTruncated ? { scopeListingTruncated: true } : {}),
 		};
 	},
 };
