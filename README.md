@@ -89,7 +89,16 @@ The Agent API doesn't require VS Code to be running. `src/standaloneAgentServer.
 
 The architecture is preserved as-is: the browser helper tab still holds the authenticated ServiceNow session and does the actual REST calls — this process is only a relay and command dispatcher, and never touches your ServiceNow credentials directly.
 
-**Build & run:**
+**Run it as a project-local devDependency (recommended):**
+
+```bash
+npm install --save-dev sn-scriptsync
+npx sn-scriptsync-agent
+```
+
+Run from the project you want synced — `--root` defaults to the current directory, so everything (`.sn-scriptsync/`, instance folders) lands right there. No path to hunt down or pass in.
+
+**Or from a clone of this repo:**
 
 ```bash
 npm run compile
@@ -98,7 +107,7 @@ npm run agent-server -- --root /path/to/scriptsync-folder
 node out/standaloneAgentServer.js --root /path/to/scriptsync-folder
 ```
 
-`--root` is the sync folder — the one containing `<instance>/` subfolders with `_settings.json` (the same folder VS Code would sync into).
+`--root` is the sync folder — the one containing `<instance>/` subfolders with `_settings.json` (the same folder VS Code would sync into). Omit it (either form) to default to the current directory.
 
 **Options** (flag or environment variable):
 

@@ -31,6 +31,17 @@
 		"onView:scriptSync"
 	],
 	"main": "./out/extension.js",
+	"bin": {
+		"sn-scriptsync-agent": "./out/standaloneAgentServer.js"
+	},
+	"files": [
+		"out/agent",
+		"out/standaloneAgentServer.js",
+		"out/ExtensionUtils.js",
+		"out/workspaceRoot.js",
+		"out/constants.js",
+		"resources/metaDataRelations.json"
+	],
 	"contributes": {
 		"commands": [
 			{

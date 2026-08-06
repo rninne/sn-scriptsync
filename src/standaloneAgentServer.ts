@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /*
  * Standalone host for the sn-scriptsync HTTP Agent API — no VS Code required.
  *
@@ -13,12 +14,18 @@
  * behind the Runtime shim (see src/agent/runtime.ts) — this file is the
  * second implementation of that shim, alongside extension.ts's.
  *
- * Usage:
- *   node out/standaloneAgentServer.js --root /path/to/scriptsync-folder [options]
+ * Usage (run from the project you want synced — --root defaults to cwd):
+ *   npx sn-scriptsync-agent [options]
+ *   node out/standaloneAgentServer.js [options]
  *
  * Options (all also settable via env var):
- *   --root <path>        (SN_AGENT_ROOT, required) sync folder — the one
- *                         containing <instance>/ subfolders with _settings.json
+ *   --root <path>        (SN_AGENT_ROOT, default: current directory) sync
+ *                         folder — the one containing <instance>/ subfolders
+ *                         with _settings.json. Defaults to cwd so this can
+ *                         run as a project-local devDependency: install it in
+ *                         a project, run it from that project's root, and
+ *                         everything (instance folders, .sn-scriptsync/) lands
+ *                         right there — no path to hunt down or pass in.
  *   --ws-port <n>         (SN_AGENT_WS_PORT, default 1978) port the SN Utils
  *                         helper tab dials. Must be 1978 unless your SN Utils
  *                         build has been configured for a different port.
@@ -88,6 +95,7 @@ function logWsTraffic(direction: '→' | '←', payload: any, extra?: string) {
 
 interface CliOptions {
 	root: string;
+	rootExplicit: boolean;
 	wsPort: number;
 	configPath?: string;
 }
@@ -104,7 +112,13 @@ function parseArgs(argv: string[]): CliOptions {
 		else if (arg === '--config') configPath = argv[++i] || configPath;
 	}
 
-	return { root, wsPort, configPath };
+	const rootExplicit = !!root;
+	// Default to cwd — the point of running this as a project-local
+	// devDependency is "install here, run here", not "figure out and pass
+	// in a path every time".
+	if (!root) root = process.cwd();
+
+	return { root, rootExplicit, wsPort, configPath };
 }
 
 function loadHeadlessSettings(configPath: string | undefined, log: (msg: string) => void) {
@@ -123,10 +137,8 @@ async function main() {
 	const opts = parseArgs(process.argv.slice(2));
 	const log = (msg: string) => console.log(`[sn-agent-server] ${msg}`);
 
-	if (!opts.root) {
-		console.error('Usage: node out/standaloneAgentServer.js --root <sync-folder> [--ws-port 1978] [--config settings.json]');
-		console.error('(or set SN_AGENT_ROOT / SN_AGENT_WS_PORT / SN_AGENT_CONFIG env vars)');
-		process.exit(1);
+	if (!opts.rootExplicit) {
+		log(`No --root given — using the current directory: ${opts.root}`);
 	}
 
 	const root = path.resolve(opts.root);
