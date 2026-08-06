@@ -351,10 +351,10 @@ live in the `snu-agent-api` skill** — read it before issuing commands.
 
 ### Connect (do this every session — never cache port/token)
 
-The extension publishes its port + auth token to `.vscode/sn-agent-port.json`. The file can be
+The extension publishes its port + auth token to `.sn-scriptsync/agent-port.json`. The file can be
 stale (synced from another machine, leftover from a crash), so validate it live every session:
 
-1. Read `port`, `token`, `pid` from `.vscode/sn-agent-port.json`.
+1. Read `port`, `token`, `pid` from `.sn-scriptsync/agent-port.json`.
 2. `GET http://127.0.0.1:<port>/api/health` — trust the endpoint **only if** it returns HTTP 200,
    `health.pid` matches the file's `pid`, and `health.apiVersion` is one you support.
 3. Discover the live command set from `health.commands[]` — don't hard-code it.

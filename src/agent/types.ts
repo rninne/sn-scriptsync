@@ -160,7 +160,7 @@ export interface CommandHandler<P = any, R = any> {
 	docs: CommandDocs;
 }
 
-/** Metadata written to .vscode/sn-agent-port.json for agents to discover. */
+/** Metadata written to .sn-scriptsync/agent-port.json for agents to discover. */
 export interface AgentPortFile {
 	port: number;
 	token: string;

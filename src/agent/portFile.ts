@@ -31,7 +31,11 @@ export const AGENT_API_FIXED_PORT = 1977;
 function workspacePortFilePath(): string | undefined {
 	const root = getWorkspaceRoot();
 	if (!root) return undefined;
-	return path.join(root, '.vscode', 'sn-agent-port.json');
+	// Lives under a dedicated .sn-scriptsync/ folder rather than .vscode/ so
+	// it isn't tied to any one editor — the standalone agent server has no
+	// VS Code workspace to speak of, and Cursor/other tools shouldn't need to
+	// know about VS Code's folder either.
+	return path.join(root, '.sn-scriptsync', 'agent-port.json');
 }
 
 /** Well-known per-user location so agents in any directory (terminal sessions,

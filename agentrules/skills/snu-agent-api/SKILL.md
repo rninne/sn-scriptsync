@@ -17,7 +17,7 @@ The Agent API lets AI assistants drive the extension: sync files, create/update 
 
 ## Transport 1: HTTP (recommended, event-driven)
 
-When the extension is running it spins up a local HTTP server bound to `127.0.0.1`. Port and auth token are published to `.vscode/sn-agent-port.json`:
+When the extension is running it spins up a local HTTP server bound to `127.0.0.1`. Port and auth token are published to `.sn-scriptsync/agent-port.json`:
 
 ```json
 {
@@ -33,13 +33,13 @@ When the extension is running it spins up a local HTTP server bound to `127.0.0.
 
 ```bash
 # Unix / macOS
-PORT=$(jq -r .port .vscode/sn-agent-port.json)
-TOKEN=$(jq -r .token .vscode/sn-agent-port.json)
+PORT=$(jq -r .port .sn-scriptsync/agent-port.json)
+TOKEN=$(jq -r .token .sn-scriptsync/agent-port.json)
 ```
 
 ```powershell
 # Windows PowerShell
-$cfg = Get-Content .vscode/sn-agent-port.json | ConvertFrom-Json
+$cfg = Get-Content .sn-scriptsync/agent-port.json | ConvertFrom-Json
 $PORT  = $cfg.port
 $TOKEN = $cfg.token
 ```
@@ -50,7 +50,7 @@ The port file lives inside the workspace, which may be synced by iCloud/OneDrive
 A file from another machine or a previous VS Code session can be **stale**, so never
 trust it blindly and never cache the port/token. Each session:
 
-1. Read `.vscode/sn-agent-port.json` for `port`, `token`, and `pid`.
+1. Read `.sn-scriptsync/agent-port.json` for `port`, `token`, and `pid`.
 2. Call `GET http://127.0.0.1:<port>/api/health`.
 3. Trust the endpoint **only if** all hold:
    - the health request succeeds (HTTP 200), and
@@ -68,7 +68,7 @@ curl -s http://127.0.0.1:$PORT/api/health
 # → { "status": "success", "apiVersion": 4, "commands": [...], "pid": 68861 }
 ```
 
-The extension deletes `.vscode/sn-agent-port.json` when the server stops, but a crash or
+The extension deletes `.sn-scriptsync/agent-port.json` when the server stops, but a crash or
 a sync conflict can leave a stale file behind — which is exactly why the `pid` cross-check
 in step 3 is mandatory before sending real commands.
 

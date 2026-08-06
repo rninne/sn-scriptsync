@@ -36,7 +36,7 @@ Thumbs.db
 # Note: the file-transport queue lives under the synced instance workspace
 # (<instance>/agent/requests|responses), NOT in this repo. Scope the ignore to
 # those queue dirs so it never swallows the src/agent/ source.
-.vscode/sn-agent-port.json
+.sn-scriptsync/agent-port.json
 **/agent/requests/
 **/agent/responses/
 

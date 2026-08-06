@@ -47,7 +47,7 @@ Files modified by AI agents (Cursor, GitHub Copilot, Windsurf, etc.), git operat
 
 ### ⚡ Agent API (HTTP, 4.3.0+)
 
-AI agents talk to scriptsync through a local HTTP server on `127.0.0.1`. The extension picks a random port on startup and writes it, together with a per-session auth token, to `.vscode/sn-agent-port.json`:
+AI agents talk to scriptsync through a local HTTP server on `127.0.0.1`. The extension picks a random port on startup and writes it, together with a per-session auth token, to `.sn-scriptsync/agent-port.json`:
 
 ```json
 { "port": 53123, "token": "4f9a...hex...", "pid": 68861, "apiVersion": 2, "startedAt": 1734000000000 }
@@ -56,8 +56,8 @@ AI agents talk to scriptsync through a local HTTP server on `127.0.0.1`. The ext
 Quick example:
 
 ```bash
-PORT=$(jq -r .port  .vscode/sn-agent-port.json)
-TOKEN=$(jq -r .token .vscode/sn-agent-port.json)
+PORT=$(jq -r .port  .sn-scriptsync/agent-port.json)
+TOKEN=$(jq -r .token .sn-scriptsync/agent-port.json)
 
 curl -s -X POST http://127.0.0.1:$PORT/api \
   -H "Content-Type: application/json" \
@@ -85,7 +85,7 @@ See [CHANGELOG.md](https://github.com/arnoudkooi/sn-scriptsync/blob/main/CHANGEL
 
 ### 🖥️ Headless Agent Server (no VS Code required)
 
-The Agent API doesn't require VS Code to be running. `src/standaloneAgentServer.ts` is a plain Node.js host that runs just the two things AI agents actually need — the WebSocket relay to the SN Utils browser helper tab, and the HTTP Agent API — leaving out everything VS Code-specific (tree views, editor commands, the Pending Saves review queue). The wire protocol, command set, and `.vscode/sn-agent-port.json` discovery are unchanged, so anything written against the Agent API works identically against either host.
+The Agent API doesn't require VS Code to be running. `src/standaloneAgentServer.ts` is a plain Node.js host that runs just the two things AI agents actually need — the WebSocket relay to the SN Utils browser helper tab, and the HTTP Agent API — leaving out everything VS Code-specific (tree views, editor commands, the Pending Saves review queue). The wire protocol, command set, and `.sn-scriptsync/agent-port.json` discovery are unchanged, so anything written against the Agent API works identically against either host.
 
 The architecture is preserved as-is: the browser helper tab still holds the authenticated ServiceNow session and does the actual REST calls — this process is only a relay and command dispatcher, and never touches your ServiceNow credentials directly.
 
@@ -108,11 +108,11 @@ node out/standaloneAgentServer.js --root /path/to/scriptsync-folder
 | `--ws-port <n>` | `SN_AGENT_WS_PORT` | `1978` | Port the SN Utils helper tab dials. Only one process can hold this port — stop any running VS Code window with sn-scriptsync enabled first, or pick a different port and reconfigure the browser side |
 | `--config <path>` | `SN_AGENT_CONFIG` | — | JSON file of the same permission-gate settings VS Code exposes (see below); omit any key to keep its VS Code default |
 
-Once running, open the SN Utils helper tab in your browser and connect via `/token`, exactly as you would for the VS Code extension. The HTTP Agent API's port and token are written to `.vscode/sn-agent-port.json` under `--root`, same as always:
+Once running, open the SN Utils helper tab in your browser and connect via `/token`, exactly as you would for the VS Code extension. The HTTP Agent API's port and token are written to `.sn-scriptsync/agent-port.json` under `--root`, same as always:
 
 ```bash
-PORT=$(jq -r .port  <root>/.vscode/sn-agent-port.json)
-TOKEN=$(jq -r .token <root>/.vscode/sn-agent-port.json)
+PORT=$(jq -r .port  <root>/.sn-scriptsync/agent-port.json)
+TOKEN=$(jq -r .token <root>/.sn-scriptsync/agent-port.json)
 
 curl -s -X POST http://127.0.0.1:$PORT/api \
   -H "Content-Type: application/json" \
