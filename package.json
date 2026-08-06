@@ -404,7 +404,8 @@
 		"release:npm": "node scripts/publish.mjs npm",
 		"release:all": "node scripts/publish.mjs all",
 		"watch": "tsc -watch -p ./",
-		"agent-server": "node out/standaloneAgentServer.js"
+		"agent-server": "node out/standaloneAgentServer.js",
+		"prepare": "npm run compile"
 	},
 	"devDependencies": {
 		"@types/node": "^18.15.11",
