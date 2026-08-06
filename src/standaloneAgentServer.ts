@@ -207,6 +207,7 @@ async function main() {
 		httpState = await startAgentHttpServer({
 			onLog: (m) => log(`[agent-http] ${m}`),
 			onTraffic: logHttpTraffic,
+			getBridgeStatus: () => ({ serverRunning, browserConnected: !!wss && wss.clients.size > 0 }),
 		});
 	} catch (e: any) {
 		log(`Agent HTTP API failed to start: ${e?.message || e}`);

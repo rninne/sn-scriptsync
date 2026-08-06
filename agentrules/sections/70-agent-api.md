@@ -55,8 +55,29 @@ the port/token. Each session:
 
 ```bash
 curl -s http://127.0.0.1:$PORT/api/health
-# → { "status": "success", "apiVersion": 6, "commands": [...], "pid": 68861 }
 ```
+
+```json
+{
+  "status": "success",
+  "apiVersion": 6,
+  "commands": ["..."],
+  "pid": 68861,
+  "serverRunning": true,
+  "browserConnected": true,
+  "quickstart": [
+    { "step": 1, "command": "check_connection", "purpose": "Verify that the WS server is running and a browser tab is connected." },
+    { "step": 2, "command": "list_instances", "purpose": "List every instance folder in the workspace with its URL and per-instance activity freshness, plus a suggested default — purely local, no browser round-trip." },
+    { "step": 3, "command": "get_instance_info", "purpose": "Return the resolved instance name, connection flags, and per-instance activity freshness." }
+  ]
+}
+```
+
+`serverRunning`/`browserConnected` answer "is this actually working" — the WS bridge and
+the helper-tab connection — without an authenticated call. `quickstart` is a fixed,
+three-step bootstrap hint (not the full instance-resolution algorithm below, which stays
+here); each `purpose` is that command's own one-line summary, so it can't drift out of
+sync with the command's real docs.
 
 The extension deletes both port files when the server stops, but a crash or a sync
 conflict can leave a stale file behind — which is exactly why the `pid` cross-check

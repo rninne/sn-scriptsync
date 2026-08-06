@@ -6,9 +6,37 @@ import { AddressInfo } from 'net';
 import { dispatchAgentCommand } from '../dispatcher';
 import { httpStatusForCode } from '../errors';
 import { AgentRequest, AgentResponse } from '../types';
-import { commandNames } from '../commands';
+import { commandNames, getCommand } from '../commands';
 import * as pendingRegistry from '../pendingRegistry';
 import { writePortFile, deletePortFile, reassertPortFiles, getPortFilePath, globalPortFilePath, AGENT_API_VERSION, AGENT_API_FIXED_PORT } from '../portFile';
+
+// The connect-time bootstrap sequence every agent needs, in order. Kept to a
+// handful of steps with each command's own one-line docs.summary (not a full
+// copy of the algorithm in agentrules/sections/70-agent-api.md) so this can't
+// drift out of sync with the command's real behavior, and stays cheap to ship
+// on every unauthenticated health check.
+const QUICKSTART_COMMANDS = ['check_connection', 'list_instances', 'get_instance_info'];
+
+function buildQuickstart(): Array<{ step: number; command: string; purpose: string }> {
+	return QUICKSTART_COMMANDS.map((name, i) => {
+		const cmd = getCommand(name);
+		return cmd ? { step: i + 1, command: name, purpose: cmd.docs.summary } : undefined;
+	}).filter((x): x is { step: number; command: string; purpose: string } => !!x);
+}
+
+// The connect-time bootstrap sequence every agent needs, in order. Kept to a
+// handful of steps with each command's own one-line docs.summary (not a full
+// copy of the algorithm in agentrules/sections/70-agent-api.md) so this can't
+// drift out of sync with the command's real behavior, and stays cheap to ship
+// on every unauthenticated health check.
+const QUICKSTART_COMMANDS = ['check_connection', 'list_instances', 'get_instance_info'];
+
+function buildQuickstart(): Array<{ step: number; command: string; purpose: string }> {
+	return QUICKSTART_COMMANDS.map((name, i) => {
+		const cmd = getCommand(name);
+		return cmd ? { step: i + 1, command: name, purpose: cmd.docs.summary } : undefined;
+	}).filter((x): x is { step: number; command: string; purpose: string } => !!x);
+}
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB – attachments push this up
 
@@ -172,6 +200,13 @@ async function probeAndYieldStandalone(fixedPort: number): Promise<void> {
 	}
 }
 
+export interface BridgeStatus {
+	/** WS relay listening (irrespective of whether a browser tab is attached). */
+	serverRunning: boolean;
+	/** SN Utils helper tab connected to the WS relay right now. */
+	browserConnected: boolean;
+}
+
 export async function startAgentHttpServer(opts: {
 	extensionVersion?: string;
 	onLog?: (msg: string) => void;
@@ -182,11 +217,15 @@ export async function startAgentHttpServer(opts: {
 	 * descriptor so a second window can name which workspace owns the bridge. */
 	workspaceRoot?: string;
 	onTraffic?: (event: TrafficEvent) => void;
+	/** Reports WS bridge/browser-tab state for the health endpoint. Omit to
+	 * report both as false (host hasn't wired the bridge up yet). */
+	getBridgeStatus?: () => BridgeStatus;
 }): Promise<HttpServerState> {
 	const token = crypto.randomBytes(16).toString('hex');
 	const log = opts.onLog || (() => { /* noop */ });
 	const traffic = opts.onTraffic || (() => { /* noop */ });
 	const startedAt = Date.now();
+	const getBridgeStatus = opts.getBridgeStatus || (() => ({ serverRunning: false, browserConnected: false }));
 
 	const server = http.createServer(async (req, res) => {
 		try {
@@ -195,13 +234,17 @@ export async function startAgentHttpServer(opts: {
 			const url = new URL(req.url, 'http://127.0.0.1');
 
 			// Health endpoint – no auth, used by agents to discover whether the
-			// extension is up and to read feature flags.
+			// extension is up and to read feature flags. Also reports live bridge
+			// status (is the WS relay up, is a browser tab attached) and a short
+			// connect-time quickstart, so "is this thing actually working" and
+			// "what do I call first" don't require a round trip through docs.
 			//
 			// hostKind is what lets a caller tell an editor-hosted bridge from a
 			// standalone one. Omitting it is why `snu status` reported
 			// `hostKind: unknown` for a perfectly healthy editor bridge, and why a
 			// second window's yield probe could not identify the current owner.
 			if (req.method === 'GET' && url.pathname === '/api/health') {
+				const bridge = getBridgeStatus();
 				return sendJson(res, 200, {
 					status: 'success',
 					// `transportApiVersion` is the real name: it versions this
@@ -217,6 +260,8 @@ export async function startAgentHttpServer(opts: {
 					startedAt: startedAt,
 					extensionVersion: opts.extensionVersion,
 					workspaceRoot: opts.workspaceRoot,
+					...bridge,
+					quickstart: buildQuickstart(),
 				});
 			}
 

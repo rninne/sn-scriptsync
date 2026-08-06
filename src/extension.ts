@@ -2505,6 +2505,7 @@ async function startBridgeTransports(): Promise<void> {
 			// which build owns the bridge.
 			extensionVersion: extensionContext?.extension?.packageJSON?.version || undefined,
 			workspaceRoot: syncRoot,
+			getBridgeStatus: () => ({ serverRunning, browserConnected: !!wss && wss.clients.size > 0 }),
 		});
 		agentHttpState = state;
 		debugLog(`Agent HTTP API listening on 127.0.0.1:${state.port}`);
