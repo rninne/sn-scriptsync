@@ -152,6 +152,16 @@ Colors auto-disable when output isn't a TTY (e.g. piped to a file), so redirecte
 
 See `agentrules/commands/refresh_scope.md` for parameters and the full response shape.
 
+**Finding a running server without knowing its root:** every server (headless or VS Code) registers itself in `~/.sn-scriptsync/servers.json` — a per-machine index of what's currently running, which port it's on, and which instances it knows about:
+
+```json
+[{ "root": "/path/to/project", "pid": 50761, "httpPort": 63628, "wsPort": 1978,
+   "portFilePath": "/path/to/project/.sn-scriptsync/agent-port.json",
+   "instances": [{ "name": "surfcddev", "url": "https://surfcddev.service-now.com" }] }]
+```
+
+It's a plain local file, not a network broadcast (see the mDNS/Bonjour discussion — LAN service discovery solves a different problem than "which of my own processes owns this instance", and would mean exposing a security-sensitive dev tool onto the network for no benefit here). It deliberately excludes the auth token — only `portFilePath`, which still gets the same pid/health-check verification any port file requires. `/api/health` on any candidate server also now reports `serverRunning`/`browserConnected` and a `quickstart` hint, so an agent can confirm a server is actually usable before committing to it.
+
 **Not included headless:** the Pending Saves review queue and its tree view (`sn-scriptsync.agentApi.reviewWrites` has no effect — writes always go straight through), the legacy file-based Agent API transport, and anything editor-specific (auto-sync on save, context menu commands, IntelliSense). Every Agent API command, instance/scope resolution, and `_map.json` naming behaves identically to the VS Code extension.
 
 ### 🔒 Security Enhancements

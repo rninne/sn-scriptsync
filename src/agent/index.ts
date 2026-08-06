@@ -28,3 +28,4 @@ export {
 } from './bridgeOwnership';
 export type { BridgeOwnership, OwnershipProbes, PortDescriptor } from './bridgeOwnership';
 export type { AgentRequest } from './types';
+export { updateInstances, addInstance, collectInstances, getRegistryPath } from './registry';

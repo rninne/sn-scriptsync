@@ -44,6 +44,10 @@ import * as pendingRegistry from './agent/pendingRegistry';
 import { setHeadlessSettings } from './agent/commands/_shared';
 import { startAgentHttpServer, stopAgentHttpServer, HttpServerState, TrafficEvent } from './agent/transport/http';
 import { AgentErrorCode } from './agent/errors';
+import { addInstance, getRegistryPath } from './agent/registry';
+import { ExtensionUtils } from './ExtensionUtils';
+
+const eu = new ExtensionUtils();
 
 // --- Rich traffic log -------------------------------------------------------
 // Colorized, structured lines for every HTTP request/response and every
@@ -192,6 +196,23 @@ async function main() {
 			} catch {
 				return;
 			}
+
+			// Mirrors extension.ts's unconditional `if (messageJson?.instance)
+			// eu.writeInstanceSettings(...)` — without this, _settings.json (and
+			// its g_ck) never refreshes headless, and a brand-new instance can
+			// never bootstrap here at all. Detect "new" *before* writing so the
+			// registry only gets touched when it would otherwise go stale, not
+			// on every message (these arrive far too often for that to be cheap).
+			if (messageJson?.instance) {
+				const isNewInstance = !!messageJson.instance.name
+					&& !fs.existsSync(path.join(root, messageJson.instance.name));
+				eu.writeInstanceSettings(messageJson.instance);
+				if (isNewInstance) {
+					addInstance(root, process.pid, { name: messageJson.instance.name, url: messageJson.instance.url });
+					log(`New instance discovered: ${messageJson.instance.name}`);
+				}
+			}
+
 			if (messageJson?.agentRequestId) {
 				const matched = pendingRegistry.resolve(messageJson.agentRequestId, messageJson);
 				logWsTraffic('←', messageJson, matched ? undefined : 'unmatched — no pending request for this id');
@@ -208,6 +229,7 @@ async function main() {
 			onLog: (m) => log(`[agent-http] ${m}`),
 			onTraffic: logHttpTraffic,
 			getBridgeStatus: () => ({ serverRunning, browserConnected: !!wss && wss.clients.size > 0 }),
+			wsPort: opts.wsPort,
 		});
 	} catch (e: any) {
 		log(`Agent HTTP API failed to start: ${e?.message || e}`);
@@ -218,6 +240,7 @@ async function main() {
 	log(`Agent HTTP API listening on 127.0.0.1:${httpState.port}`);
 	log(`Port/token file: ${httpState.portFilePath || '(not written — could not resolve root)'}`);
 	log(`Sync folder: ${root}`);
+	log(`Registered in: ${getRegistryPath()}`);
 
 	let shuttingDown = false;
 	async function shutdown(signal: string) {

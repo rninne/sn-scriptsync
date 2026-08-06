@@ -19,9 +19,14 @@ free). Files can be stale (leftover from a crash), so validate live every sessio
 
 1. Read `port`, `token`, `pid` from `~/.sn-scriptsync/agent-port.json` (fall back to
    `.vscode/sn-agent-port.json` for older versions). Expect `port` to be 1977 unless it was
-   taken and the server fell back to an ephemeral one.
+   taken and the server fell back to an ephemeral one. Don't know which folder to look in?
+   Check `~/.sn-scriptsync/servers.json` first — a per-machine index of every running server
+   and the instances each one knows about (see "Finding the right server" in the
+   `snu-agent-api` skill).
 2. `GET http://127.0.0.1:<port>/api/health` — trust the endpoint **only if** it returns HTTP 200,
-   `health.pid` matches the file's `pid`, and `health.apiVersion` is one you support.
+   `health.pid` matches the file's `pid`, and `health.apiVersion` is one you support. The response
+   also includes `serverRunning`/`browserConnected` (is the bridge actually up) and a `quickstart`
+   hint for what to call next.
 3. Discover the live command set from `health.commands[]` — don't hard-code it.
 4. If any check fails, the HTTP server isn't usable — fall back to the file transport (see the
    `snu-agent-api` skill).

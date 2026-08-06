@@ -181,6 +181,56 @@ If `list_instances` isn't available (older extension), fall back to reading the
 `<instance>/_settings.json` mtimes yourself and applying the same rule. Once
 resolved, reuse that `instance` for the rest of the session.
 
+### Finding the right server when you don't know the root folder
+
+Everything above assumes you already know which sync folder (and therefore
+which port file) to read. If you don't — e.g. you were asked to "query X from
+instance Y" with no path context — check the **global server registry**
+before hunting for `_settings.json` files across the filesystem:
+
+**`~/.sn-scriptsync/servers.json`** — a per-machine index of every currently
+running sn-scriptsync server (the VS Code extension or the standalone
+headless host), refreshed on startup/shutdown and whenever a not-yet-seen
+instance is discovered:
+
+```json
+[
+  {
+    "root": "/Users/you/project-a",
+    "pid": 50761,
+    "httpPort": 63628,
+    "wsPort": 1978,
+    "portFilePath": "/Users/you/project-a/.sn-scriptsync/agent-port.json",
+    "instances": [{ "name": "surfcddev", "url": "https://surfcddev.service-now.com" }],
+    "startedAt": 1785896313788
+  }
+]
+```
+
+1. Read `~/.sn-scriptsync/servers.json`. Missing or empty means no sn-scriptsync
+   server is running anywhere on this machine right now — fall back to
+   whatever sync-folder context you already have.
+2. Filter entries whose `instances[].name` matches the instance you need. If
+   more than one server claims the same instance name, or none do, don't
+   guess — confirm with the user; that's an unusual state worth surfacing,
+   not silently picking one.
+3. Read `portFilePath` from the matched entry — it's the *same* per-root port
+   file "Required discovery algorithm" above describes. Apply the *same*
+   trust check on it: `GET /api/health`, confirm `health.pid` matches,
+   confirm `health.apiVersion` is supported. The registry only narrows down
+   *which file to read* — it never replaces that check, since the registry
+   itself is a best-effort discovery convenience, not an authenticated
+   source of truth (and deliberately doesn't carry the token — only a
+   pointer to where the real, per-root port/token file lives).
+4. `instances` is a snapshot, not continuously live — refreshed at server
+   startup and whenever a brand-new instance first connects, not on every
+   request. If your target instance isn't listed yet, it may just not have
+   synced/connected since that server started; a live `list_instances` call
+   against a candidate server is the ground truth if the registry comes up
+   empty for something you expect to exist.
+
+Never write to this file yourself — it's entirely server-managed.
+
 ## Transport: HTTP only
 
 The legacy file-based transport (`{instance_folder}/agent/requests/*.json`) was removed in 4.8.0. Every agent flow uses the HTTP Agent API above; if a request file is dropped in the workspace nothing will pick it up.

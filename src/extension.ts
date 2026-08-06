@@ -52,6 +52,7 @@ import {
 	processStartTime,
 	OwnerLease,
 	LEASE_HEARTBEAT_MS,
+	addInstance,
 } from './agent';
 
 
@@ -2506,6 +2507,7 @@ async function startBridgeTransports(): Promise<void> {
 			extensionVersion: extensionContext?.extension?.packageJSON?.version || undefined,
 			workspaceRoot: syncRoot,
 			getBridgeStatus: () => ({ serverRunning, browserConnected: !!wss && wss.clients.size > 0 }),
+			wsPort: 1978,
 		});
 		agentHttpState = state;
 		debugLog(`Agent HTTP API listening on 127.0.0.1:${state.port}`);
@@ -2737,8 +2739,21 @@ async function startBridgeTransports(): Promise<void> {
 				}
 
 			// start new methods to replace webserver with websocket
-			if (messageJson?.instance) 
+			if (messageJson?.instance) {
+				// Detect a not-yet-seen instance *before* writing its settings, so
+				// the global server registry (~/.sn-scriptsync/servers.json) gets
+				// refreshed exactly when it would otherwise go stale — not on every
+				// message, which arrives far too often for this to be cheap.
+				// addInstance() (not a filesystem rescan) avoids racing
+				// writeInstanceSettings()'s own async fs.mkdir/fs.writeFile below.
+				const root = getWorkspaceRoot();
+				const isNewInstance = !!root && !!messageJson.instance.name
+					&& !fs.existsSync(path.join(root, messageJson.instance.name));
 				eu.writeInstanceSettings(messageJson.instance);
+				if (isNewInstance && root) {
+					addInstance(root, process.pid, { name: messageJson.instance.name, url: messageJson.instance.url });
+				}
+			}
 			if (messageJson?.action == 'saveFieldAsFile')
 				saveFieldAsFile(messageJson);
 			else if (messageJson?.action == 'createRecordResponse')

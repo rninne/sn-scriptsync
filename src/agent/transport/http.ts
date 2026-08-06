@@ -9,20 +9,8 @@ import { AgentRequest, AgentResponse } from '../types';
 import { commandNames, getCommand } from '../commands';
 import * as pendingRegistry from '../pendingRegistry';
 import { writePortFile, deletePortFile, reassertPortFiles, getPortFilePath, globalPortFilePath, AGENT_API_VERSION, AGENT_API_FIXED_PORT } from '../portFile';
-
-// The connect-time bootstrap sequence every agent needs, in order. Kept to a
-// handful of steps with each command's own one-line docs.summary (not a full
-// copy of the algorithm in agentrules/sections/70-agent-api.md) so this can't
-// drift out of sync with the command's real behavior, and stays cheap to ship
-// on every unauthenticated health check.
-const QUICKSTART_COMMANDS = ['check_connection', 'list_instances', 'get_instance_info'];
-
-function buildQuickstart(): Array<{ step: number; command: string; purpose: string }> {
-	return QUICKSTART_COMMANDS.map((name, i) => {
-		const cmd = getCommand(name);
-		return cmd ? { step: i + 1, command: name, purpose: cmd.docs.summary } : undefined;
-	}).filter((x): x is { step: number; command: string; purpose: string } => !!x);
-}
+import { getWorkspaceRoot } from '../../workspaceRoot';
+import { registerServer, unregisterServer, collectInstances } from '../registry';
 
 // The connect-time bootstrap sequence every agent needs, in order. Kept to a
 // handful of steps with each command's own one-line docs.summary (not a full
@@ -220,6 +208,11 @@ export async function startAgentHttpServer(opts: {
 	/** Reports WS bridge/browser-tab state for the health endpoint. Omit to
 	 * report both as false (host hasn't wired the bridge up yet). */
 	getBridgeStatus?: () => BridgeStatus;
+	/** The WS relay's port (fixed 1978 for both hosts today), recorded in the
+	 * global server registry (~/.sn-scriptsync/servers.json) alongside the
+	 * HTTP port so an agent can find the right server without already
+	 * knowing which root folder to look in. */
+	wsPort: number;
 }): Promise<HttpServerState> {
 	const token = crypto.randomBytes(16).toString('hex');
 	const log = opts.onLog || (() => { /* noop */ });
@@ -384,6 +377,18 @@ export async function startAgentHttpServer(opts: {
 		workspaceRoot: opts.workspaceRoot,
 	});
 
+	const root = getWorkspaceRoot();
+	if (root) {
+		registerServer({
+			root,
+			pid: process.pid,
+			httpPort: port,
+			wsPort: opts.wsPort,
+			portFilePath,
+			instances: collectInstances(),
+		});
+	}
+
 	log(`[agent-http] listening on 127.0.0.1:${port}, port file: ${portFilePath || 'n/a'}`);
 
 	// Self-heal: another process (notably an older ScriptSync build in a second
@@ -401,6 +406,8 @@ export function stopAgentHttpServer(state: HttpServerState | undefined): Promise
 	return new Promise((resolve) => {
 		if (state?.portFileHeartbeat) clearInterval(state.portFileHeartbeat);
 		deletePortFile();
+		const root = getWorkspaceRoot();
+		if (root) unregisterServer(root, process.pid);
 		if (!state) return resolve();
 		try {
 			state.server.close(() => resolve());
