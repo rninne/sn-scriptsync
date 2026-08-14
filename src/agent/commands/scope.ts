@@ -39,6 +39,23 @@ const eu = new ExtensionUtils();
 // unique sort — required for offset-based paging to not skip/duplicate rows.
 // `extraParams` are flat sysparm_* params (e.g. sysparm_no_count) appended
 // after the query clause — never mixed into `query` itself.
+//
+// A SHORT PAGE DOES NOT MEAN THE LAST PAGE. ServiceNow applies
+// sysparm_limit/sysparm_offset when running the query, then drops records the
+// session can't read (ACLs) while serializing the response — so a full window
+// routinely comes back a row or two short. Confirmed live against a ~15k-record
+// app scope, where the sys_metadata listing returned pages of
+// 999, 999, 999, 1000, 1000, 999, ..., 997, 998, ..., 990, 0.
+// The previous `page.length < pageSize` stop condition therefore treated the
+// very first 999-row page as the end of the scope and collected 999 of 14,980
+// records — silently hiding 14 entire tables (sys_graphql_schema, sys_script,
+// sys_ux_controller, ...) from refresh_scope, which still reported success with
+// no truncation flag. Only a genuinely empty page proves exhaustion.
+//
+// Advancing `offset` by the full pageSize (not by page.length) stays correct
+// because the offset applies to the pre-ACL-filter result set; verified live —
+// the sum of all page lengths equalled the distinct sys_id count, so this
+// neither skips nor double-counts rows.
 async function queryAllRecords(
 	ctx: AgentContext,
 	instance: any,
@@ -57,11 +74,15 @@ async function queryAllRecords(
 			(opts.extraParams ? `&${opts.extraParams}` : '');
 		const page = await queryRecords(ctx, instance, tableName, queryString);
 		records.push(...page);
-		if (page.length < pageSize) {
+		// Empty page — and only an empty page — means we're past the end.
+		if (page.length === 0) {
 			return { records, truncated: false };
 		}
 		offset += pageSize;
-		if (records.length >= maxRecords) {
+		// Bound the sweep on the window we've already asked for as well as on
+		// rows actually collected: ACL-dropped rows mean records.length can lag
+		// offset indefinitely, and it's offset that bounds the round trips.
+		if (records.length >= maxRecords || offset >= maxRecords) {
 			return { records, truncated: true };
 		}
 	}

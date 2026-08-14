@@ -1,5 +1,9 @@
 # CHANGELOG.md
 
+## Unreleased
+
+**Fix: `refresh_scope` silently refreshed only a fraction of large scopes:** Loading/refreshing a scope stopped paging through the instance as soon as ServiceNow returned a page with fewer records than requested — but a short page doesn't mean the last page. ServiceNow applies the row window when it runs the query and *then* drops records the session can't read, so a full window routinely comes back a row or two short. On a real 14,980-record app scope the very first window returned 999 of 1000 rows, so the sweep stopped there and refreshed 999 records — silently skipping 14 entire tables (business rules, GraphQL schemas, UX controllers, styles, email scripts and more) while still reporting success with no truncation warning. Files for those tables were left stale on disk indefinitely, so a "refresh to get a clean baseline" could leave you editing content the instance had long since moved past. Paging now continues until the instance genuinely returns an empty page, and the safety ceiling is bounded on the window requested as well as on rows collected. Affects both the scope listing and each table's field fetch.
+
 ## 4.9.2 (2026-09-04)
 
 **The newest helper tab always wins the bridge, and a `/token` refresh is confirmed when the snu daemon owns it (`@snutils/snu` 0.2.9).**
