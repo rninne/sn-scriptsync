@@ -76,9 +76,37 @@ const PORT_FILE_HEARTBEAT_MS = 60_000;
 // is for hosts (e.g. the standalone agent server) that want to render a
 // structured request/response stream.
 export type TrafficEvent =
-	| { type: 'request'; id: string; command: string; instance?: string }
-	| { type: 'response'; id: string; command: string; status: 'success' | 'error'; code?: string; durationMs: number }
+	| { type: 'request'; id: string; command: string; instance?: string; params?: any }
+	| { type: 'response'; id: string; command: string; status: 'success' | 'error'; code?: string; durationMs: number; summary?: string }
 	| { type: 'unauthorized'; path: string };
+
+// One-line "what did this actually return" for the traffic log, so a response
+// line carries the outcome (rows/records/files) instead of just "ok". Purely
+// cosmetic — hosts that don't log traffic never call this. Deliberately
+// generic: it reports the well-known count-ish keys commands already return
+// rather than special-casing each command, so new commands get a useful
+// summary for free and none of them can drift out of sync with it.
+const COUNT_KEYS: Array<[string, string]> = [
+	['count', 'rows'],
+	['tablesRefreshed', 'tables'],
+	['filesWritten', 'files'],
+	['recordsUpdated', 'updated'],
+	['recordsCreated', 'created'],
+	['total', 'total'],
+];
+export function summarizeResult(result: any): string | undefined {
+	if (!result || typeof result !== 'object') return undefined;
+	const bits: string[] = [];
+	for (const [key, label] of COUNT_KEYS) {
+		if (typeof result[key] === 'number') bits.push(`${result[key]} ${label}`);
+	}
+	if (Array.isArray(result.records) && !bits.length) bits.push(`${result.records.length} rows`);
+	if (result.truncated || result.scopeListingTruncated) bits.push('TRUNCATED');
+	if (Array.isArray(result.truncatedTables) && result.truncatedTables.length) {
+		bits.push(`truncated: ${result.truncatedTables.join(',')}`);
+	}
+	return bits.length ? bits.join(', ') : undefined;
+}
 
 function readJsonBody(req: http.IncomingMessage): Promise<any> {
 	return new Promise((resolve, reject) => {
@@ -330,11 +358,16 @@ export async function startAgentHttpServer(opts: {
 				parsedRequestId = body.id;
 
 				const startedAt = Date.now();
-				traffic({ type: 'request', id: body.id, command: body.command, instance: body.instance });
+				traffic({ type: 'request', id: body.id, command: body.command, instance: body.instance, params: body.params });
 
 				const response: AgentResponse = await dispatchAgentCommand(body as AgentRequest);
 				const status = response.status === 'success' ? 200 : httpStatusForCode(response.code);
-				traffic({ type: 'response', id: response.id, command: response.command, status: response.status, code: response.code, durationMs: Date.now() - startedAt });
+				traffic({
+					type: 'response', id: response.id, command: response.command,
+					status: response.status, code: response.code,
+					durationMs: Date.now() - startedAt,
+					summary: summarizeResult((response as any).result),
+				});
 				return sendJson(res, status, response);
 			}
 

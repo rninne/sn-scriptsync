@@ -74,23 +74,172 @@ function timestamp(): string {
 	return paint(ANSI.dim, new Date().toISOString().slice(11, 23));
 }
 
+// Column widths, so direction / subject / detail line up down the page and the
+// eye can scan one column instead of re-parsing every line. Padding is applied
+// to the *plain* text before painting — ANSI escapes would otherwise count
+// toward the width and break the alignment.
+const W_DIR = 6;
+const W_SUBJECT = 20;
+function pad(text: string, width: number): string {
+	return text.length >= width ? text : text + ' '.repeat(width - text.length);
+}
+function truncate(text: any, max: number): string {
+	const s = String(text ?? '');
+	return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
+}
+function ms(duration: number): string {
+	return duration < 1000 ? `${duration}ms` : `${(duration / 1000).toFixed(1)}s`;
+}
+
+// Correlation tags. Full ids look like
+//   agent_http_1786670786096_a9b6c1_1786670788998_15
+// — 50 characters of timestamp noise that wrap the line and bury the one part
+// worth reading. The HTTP request's random suffix plus the per-request
+// sequence number (`a9b6c1·15`) is enough to tie a WS leg to its HTTP line.
+function shortHttpId(id: any): string {
+	const parts = String(id ?? '').split('_');
+	return parts[parts.length - 1] || String(id ?? '?');
+}
+function shortRid(rid: any): string {
+	const m = /^agent_(.+)_(\d+)_(\d+)$/.exec(String(rid ?? ''));
+	return m ? `${shortHttpId(m[1])}·${m[3]}` : shortHttpId(rid);
+}
+
+// The point of the whole exercise: say what a message is actually asking for.
+// "agentQueryRecords" repeated 28 times is noise; "sys_ux_event limit=200" ×28
+// is a picture of what the command is doing.
+function describeWsRequest(p: any): string {
+	switch (p?.action) {
+		case 'agentQueryRecords': {
+			const q = new URLSearchParams(String(p.queryString || ''));
+			const bits = [p.tableName || '?'];
+			const limit = q.get('sysparm_limit');
+			const offset = q.get('sysparm_offset');
+			if (limit) bits.push(`limit=${limit}`);
+			if (offset && offset !== '0') bits.push(`offset=${offset}`);
+			const encoded = q.get('sysparm_query');
+			if (encoded) bits.push(paint(ANSI.dim, truncate(encoded, 64)));
+			return bits.join('  ');
+		}
+		case 'agentRestApi': {
+			const qp = p.queryParams && typeof p.queryParams === 'object'
+				? Object.entries(p.queryParams).map(([k, v]) => `${k}=${truncate(v, 30)}`).join('&')
+				: '';
+			return `${p.method || 'GET'} ${p.endpoint || '?'}${qp ? paint(ANSI.dim, `?${truncate(qp, 70)}`) : ''}`;
+		}
+		case 'agentRunBackgroundScript':
+			return paint(ANSI.dim, `${String(p.script || '').length} chars of script`);
+		case 'createRecord':
+		case 'requestTableStructure':
+		case 'checkNameExists':
+			return String(p.tableName || p.table || '');
+		case 'agentCodeSearch':
+			return truncate(p.term || p.searchTerm || '', 60);
+		case 'takeScreenshot':
+		case 'activateTab':
+		case 'refreshPreview':
+			return truncate(p.url || '', 70);
+		default:
+			return '';
+	}
+}
+
+function rowCount(n: number): string {
+	return `${n} row${n === 1 ? '' : 's'}`;
+}
+
+function describeWsResponse(p: any): string {
+	if (Array.isArray(p?.records)) return rowCount(p.records.length);
+	const inner = p?.data?.result;
+	if (Array.isArray(inner)) return rowCount(inner.length);
+	if (inner && typeof inner === 'object') return '1 record';
+	if (p?.success === false || p?.error) return paint(ANSI.red, truncate(p.error || 'error', 70));
+	if (typeof p?.status === 'number') return `HTTP ${p.status}`;
+	return '';
+}
+
+// The bare identifying token for a request, with NO colour applied — the
+// response line re-prints it, and truncating a painted string can slice an
+// ANSI escape in half and corrupt the rest of the line.
+function wsSubject(p: any): string {
+	switch (p?.action) {
+		case 'agentQueryRecords': return String(p.tableName || '');
+		case 'agentRestApi': return `${p.method || 'GET'} ${p.endpoint || ''}`;
+		case 'createRecord':
+		case 'requestTableStructure':
+		case 'checkNameExists': return String(p.tableName || p.table || '');
+		default: return '';
+	}
+}
+
+// WS legs awaiting a response, so the response line can report elapsed time and
+// repeat the subject (which table) instead of making you scroll up to the
+// matching request. Bounded: a browser that never answers must not leak.
+const MAX_IN_FLIGHT = 500;
+const inFlightWs = new Map<string, { at: number; subject: string }>();
+
 function logHttpTraffic(event: TrafficEvent) {
 	if (event.type === 'request') {
-		console.log(`${timestamp()} ${paint(ANSI.cyan, '→ HTTP')}  ${event.command}${event.instance ? ` (${event.instance})` : ''}  ${paint(ANSI.dim, `id=${event.id}`)}`);
+		const params = event.params && typeof event.params === 'object'
+			? Object.entries(event.params)
+				.filter(([, v]) => v === null || ['string', 'number', 'boolean'].includes(typeof v))
+				.slice(0, 4)
+				.map(([k, v]) => `${k}=${truncate(v, 40)}`)
+				.join(' ')
+			: '';
+		const subject = [event.instance, params].filter(Boolean).join('  ');
+		console.log(
+			`${timestamp()} ${paint(ANSI.cyan + ANSI.bold, pad('→ HTTP', W_DIR))}  ` +
+			`${paint(ANSI.bold, pad(event.command, W_SUBJECT))}  ${subject}  ` +
+			`${paint(ANSI.dim, `#${shortHttpId(event.id)}`)}`,
+		);
 	} else if (event.type === 'response') {
 		const ok = event.status === 'success';
-		const arrow = paint(ok ? ANSI.green : ANSI.red, `← HTTP  ${ok ? 'ok ' : (event.code || 'error')}`);
-		console.log(`${timestamp()} ${arrow}  ${event.command}  ${paint(ANSI.dim, `id=${event.id}  ${event.durationMs}ms`)}`);
+		const outcome = ok ? paint(ANSI.green, 'ok') : paint(ANSI.red, event.code || 'error');
+		const detail = [event.summary, ms(event.durationMs)].filter(Boolean).join('  ');
+		console.log(
+			`${timestamp()} ${paint((ok ? ANSI.green : ANSI.red) + ANSI.bold, pad('← HTTP', W_DIR))}  ` +
+			`${paint(ANSI.bold, pad(event.command, W_SUBJECT))}  ${outcome}  ${detail}  ` +
+			`${paint(ANSI.dim, `#${shortHttpId(event.id)}`)}`,
+		);
 	} else {
-		console.log(`${timestamp()} ${paint(ANSI.yellow, '✕ HTTP  401 unauthorized')}  ${event.path}`);
+		console.log(`${timestamp()} ${paint(ANSI.yellow, pad('✕ HTTP', W_DIR))}  401 unauthorized  ${event.path}`);
 	}
 }
 
 function logWsTraffic(direction: '→' | '←', payload: any, extra?: string) {
-	const action = payload?.action || '(no action)';
+	const action = String(payload?.action || '(no action)').replace(/^agent/, '');
+	const rid = payload?.agentRequestId;
 	const color = direction === '→' ? ANSI.cyan : ANSI.magenta;
-	const rid = payload?.agentRequestId ? paint(ANSI.dim, `rid=${payload.agentRequestId}`) : '';
-	console.log(`${timestamp()} ${paint(color, `${direction} WS   `)} ${action}  ${rid}${extra ? `  ${paint(ANSI.dim, extra)}` : ''}`);
+
+	let detail: string;
+	if (direction === '→') {
+		detail = describeWsRequest(payload);
+		if (rid) {
+			if (inFlightWs.size >= MAX_IN_FLIGHT) inFlightWs.clear();
+			inFlightWs.set(rid, { at: Date.now(), subject: truncate(wsSubject(payload), 44) });
+		}
+	} else {
+		detail = describeWsResponse(payload);
+		const started = rid ? inFlightWs.get(rid) : undefined;
+		if (started) {
+			inFlightWs.delete(rid);
+			// echo the subject so the response stands alone, and time the leg
+			detail = [started.subject, detail, paint(ANSI.dim, ms(Date.now() - started.at))]
+				.filter(Boolean).join('  ');
+		}
+	}
+
+	// Fixed prefix keeps the ws lines in the same columns as the HTTP ones; only
+	// the optional trailing parts are collapsed, so an absent detail or rid
+	// doesn't leave a double gap.
+	const head = `${timestamp()} ${paint(color, pad(`  ${direction} ws`, W_DIR))}  ${pad(action, W_SUBJECT)}`;
+	const tail = [
+		detail,
+		rid ? paint(ANSI.dim, `#${shortRid(rid)}`) : '',
+		extra ? paint(ANSI.yellow, extra) : '',
+	].filter(Boolean).join('  ');
+	console.log(tail ? `${head}  ${tail}` : head);
 }
 
 interface CliOptions {
@@ -135,7 +284,10 @@ function loadHeadlessSettings(configPath: string | undefined, log: (msg: string)
 
 async function main() {
 	const opts = parseArgs(process.argv.slice(2));
-	const log = (msg: string) => console.log(`[sn-agent-server] ${msg}`);
+	// Same timestamp + direction columns as the traffic lines, so command
+	// progress (`refresh_scope: 994 record(s) ...`) reads inline with the wire
+	// traffic that produced it instead of as a differently-shaped aside.
+	const log = (msg: string) => console.log(`${timestamp()} ${paint(ANSI.dim, pad('·', W_DIR))}  ${msg}`);
 
 	if (!opts.rootExplicit) {
 		log(`No --root given — using the current directory: ${opts.root}`);
