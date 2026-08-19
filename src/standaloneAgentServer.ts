@@ -349,8 +349,60 @@ async function main() {
 		process.exit(1);
 	});
 
+	// Ask the browser to hand over a fresh session token for every instance we
+	// know about.
+	//
+	// `_settings.json`'s g_ck only refreshes when the helper tab relays a message
+	// carrying that instance, and merely *connecting* doesn't do it (the tab
+	// opens with helperBuildInfo/helperLicenseInfo and nothing else). So a
+	// server restarted after the browser session aged out starts life holding a
+	// token ServiceNow will reject, and the first command to need it fails —
+	// previously as a silent empty result, now as E_TOKEN_EXPIRED. Running
+	// /token is exactly the trigger that makes the tab relay a new one, and it's
+	// a browser-extension action, so it works even though ServiceNow itself is
+	// rejecting us.
+	//
+	// Fire-and-forget on purpose: the token arrives later as its own `instance`
+	// message, not as a reply to this, so there's no correlation id to wait on.
+	// Once per connection, not per message.
+	let tokenRefreshRequested = false;
+	function requestTokenRefresh() {
+		if (tokenRefreshRequested) return;
+		tokenRefreshRequested = true;
+
+		let instances: Array<{ name: string; url: string }> = [];
+		try {
+			instances = fs.readdirSync(root, { withFileTypes: true })
+				.filter((d) => d.isDirectory() && !d.name.startsWith('.'))
+				.map((d) => {
+					const settings = eu.getFileAsJson(path.join(root, d.name, '_settings.json'));
+					return settings?.url ? { name: d.name, url: String(settings.url) } : undefined;
+				})
+				.filter((i): i is { name: string; url: string } => !!i);
+		} catch { /* no readable instance folders — nothing to refresh */ }
+
+		if (!instances.length) {
+			log('No instance folders with _settings.json yet — skipping token refresh');
+			return;
+		}
+
+		// Let the tab finish its own handshake before we ask it for anything.
+		setTimeout(() => {
+			for (const inst of instances) {
+				log(`Requesting a fresh session token for ${inst.name} (/token)`);
+				broadcastToHelperTab({
+					action: 'runSlashCommand',
+					command: '/token',
+					url: `${inst.url.replace(/\/+$/, '')}/*`,
+					autoRun: true,
+				});
+			}
+		}, 750);
+	}
+
 	wss.on('connection', (ws: any) => {
 		console.log(`${timestamp()} ${paint(ANSI.bold + ANSI.magenta, '● Helper tab connected')}`);
+		requestTokenRefresh();
 		ws.on('close', () => console.log(`${timestamp()} ${paint(ANSI.magenta, '○ Helper tab disconnected')}`));
 		ws.on('error', (err: any) => log(`Helper tab socket error: ${err?.message || err}`));
 		ws.on('message', (raw: any) => {
