@@ -230,11 +230,32 @@ async function refreshSessionToken(ctx: AgentContext, instance: any): Promise<an
 }
 
 /**
+ * Fail loudly when the browser helper reported a problem instead of data.
+ *
+ * The `agentQueryRecords` reply carries no success envelope, so the obvious
+ * `response?.records ?? []` reads a *failed* request as an *empty* one. That
+ * turned a dead ServiceNow session into a silent no-op: with a stale g_ck the
+ * helper replies `{ error: 'User is not authenticated' }`, refresh_scope saw an
+ * empty scope listing, took its "no code-bearing tables found" branch, and
+ * answered `status: "success", tablesRefreshed: 0` — indistinguishable from a
+ * genuinely empty scope. The error text was in the payload the whole time.
+ *
+ * "User is not authenticated" infers E_TOKEN_EXPIRED (502), which is both
+ * accurate and actionable: re-run /token to refresh the session.
+ */
+export function assertBrowserResponseOk(response: any, what: string): void {
+	if (!response) return; // no reply at all is the caller's / timeout's business
+	if (response.success === false || response.error) {
+		const msg: string = response.error || `${what} failed`;
+		throw new AgentError(codeForRest(response.status, msg), msg, { status: response.status });
+	}
+}
+
+/**
  * Run an encoded-query list request through the browser helper (the same
  * `agentQueryRecords` action query_records/get_parent_options use), returning
- * the raw records array. Unlike restRequest(), the browser side for this
- * action doesn't report a success/error envelope — callers get back whatever
- * `records` came back (possibly empty).
+ * the raw records array. An empty array means the query genuinely matched
+ * nothing — a failed request throws (see assertBrowserResponseOk).
  */
 export async function queryRecords(ctx: AgentContext, instance: any, tableName: string, queryString: string): Promise<any[]> {
 	const correlationId = nextCorrelationId(ctx);
@@ -248,6 +269,7 @@ export async function queryRecords(ctx: AgentContext, instance: any, tableName: 
 		appName: 'VS Code',
 	});
 	const response = await pending;
+	assertBrowserResponseOk(response, `query on ${tableName}`);
 	return response?.records ?? [];
 }
 
