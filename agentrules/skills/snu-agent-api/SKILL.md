@@ -3,7 +3,7 @@ name: snu-agent-api
 description: SN ScriptSync HTTP/file Agent API: endpoint discovery, auth, the full error-code table, and the complete command catalog (query_records, get_record, update_record, create_artifact, create_application, rest_request, screenshots, etc.). Read this before calling any Agent API command.
 ---
 
-<!-- SN-SCRIPTSYNC:SKILL apiVersion=18 -->
+<!-- SN-SCRIPTSYNC:SKILL apiVersion=21 -->
 
 # SN ScriptSync — Agent API
 
@@ -17,14 +17,14 @@ The Agent API lets AI assistants drive the extension: sync files, create/update 
 
 ## Transport 1: HTTP (recommended, event-driven)
 
-When the extension is running it spins up a local HTTP server bound to `127.0.0.1`. Port and auth token are published to `.sn-scriptsync/agent-port.json`:
+When the extension is running it spins up a local HTTP server bound to `127.0.0.1`, preferring the **fixed port 1977** (ephemeral fallback if taken). The actual port and auth token are published to two port files — `~/.sn-scriptsync/agent-port.json` (well-known, discoverable from any directory; written only while the connected browser has an active SN Utils Pro/Trial/Enterprise license) and `<workspace>/.vscode/sn-agent-port.json` (always written — workspace agent workflows are free):
 
 ```json
 {
-  "port": 53123,
+  "port": 1977,
   "token": "4f9a...hex...",
   "pid": 68861,
-  "apiVersion": 4,
+  "apiVersion": 6,
   "startedAt": 1734000000000
 }
 ```
@@ -32,25 +32,26 @@ When the extension is running it spins up a local HTTP server bound to `127.0.0.
 ### Discovering the endpoint
 
 ```bash
-# Unix / macOS
-PORT=$(jq -r .port .sn-scriptsync/agent-port.json)
-TOKEN=$(jq -r .token .sn-scriptsync/agent-port.json)
+# Unix / macOS — global file works from any cwd; older versions only write the workspace file
+PORT=$(jq -r .port ~/.sn-scriptsync/agent-port.json 2>/dev/null || jq -r .port .vscode/sn-agent-port.json)
+TOKEN=$(jq -r .token ~/.sn-scriptsync/agent-port.json 2>/dev/null || jq -r .token .vscode/sn-agent-port.json)
 ```
 
 ```powershell
 # Windows PowerShell
-$cfg = Get-Content .sn-scriptsync/agent-port.json | ConvertFrom-Json
+$cfg = Get-Content "$HOME/.sn-scriptsync/agent-port.json" | ConvertFrom-Json
 $PORT  = $cfg.port
 $TOKEN = $cfg.token
 ```
 
 ### Required discovery algorithm (do this every session)
 
-The port file lives inside the workspace, which may be synced by iCloud/OneDrive/git.
-A file from another machine or a previous VS Code session can be **stale**, so never
-trust it blindly and never cache the port/token. Each session:
+Port files can be **stale** (leftover from a crash; the workspace copy may even be synced
+by iCloud/OneDrive/git from another machine), so never trust one blindly and never cache
+the port/token. Each session:
 
-1. Read `.sn-scriptsync/agent-port.json` for `port`, `token`, and `pid`.
+1. Read `port`, `token`, and `pid` from `~/.sn-scriptsync/agent-port.json`, falling back to
+   `<workspace>/.vscode/sn-agent-port.json` (older versions write only the workspace file).
 2. Call `GET http://127.0.0.1:<port>/api/health`.
 3. Trust the endpoint **only if** all hold:
    - the health request succeeds (HTTP 200), and
@@ -65,33 +66,19 @@ trust it blindly and never cache the port/token. Each session:
 
 ```bash
 curl -s http://127.0.0.1:$PORT/api/health
+# → { "status": "success", "apiVersion": 6, "commands": [...], "pid": 68861 }
 ```
 
-```json
-{
-  "status": "success",
-  "apiVersion": 6,
-  "commands": ["..."],
-  "pid": 68861,
-  "serverRunning": true,
-  "browserConnected": true,
-  "quickstart": [
-    { "step": 1, "command": "check_connection", "purpose": "Verify that the WS server is running and a browser tab is connected." },
-    { "step": 2, "command": "list_instances", "purpose": "List every instance folder in the workspace with its URL and per-instance activity freshness, plus a suggested default — purely local, no browser round-trip." },
-    { "step": 3, "command": "get_instance_info", "purpose": "Return the resolved instance name, connection flags, and per-instance activity freshness." }
-  ]
-}
-```
-
-`serverRunning`/`browserConnected` answer "is this actually working" — the WS bridge and
-the helper-tab connection — without an authenticated call. `quickstart` is a fixed,
-three-step bootstrap hint (not the full instance-resolution algorithm below, which stays
-here); each `purpose` is that command's own one-line summary, so it can't drift out of
-sync with the command's real docs.
-
-The extension deletes `.sn-scriptsync/agent-port.json` when the server stops, but a crash or
-a sync conflict can leave a stale file behind — which is exactly why the `pid` cross-check
+The extension deletes both port files when the server stops, but a crash or a sync
+conflict can leave a stale file behind — which is exactly why the `pid` cross-check
 in step 3 is mandatory before sending real commands.
+
+### Self-describing docs (no auth)
+
+The running server serves its own documentation, so instructions can never drift from
+the installed version: `GET /api/instructions` (connect guide + core instructions),
+`GET /api/skills` (skill index), `GET /api/skills/<name>` (full skill markdown). If you
+were handed only the endpoint — no workspace, no files — start there.
 
 ### Sending a command
 
@@ -135,7 +122,10 @@ HTTP status codes map to codes:
 | `E_REFERENCE_INTEGRITY` | 409 | Write/delete blocked by a reference or data-integrity constraint |
 | `E_INSTANCE_REQUIRED` / `E_INSTANCE_NOT_FOUND` | 422 | Instance not resolvable |
 | `E_DISABLED` | 423 | Feature disabled via settings (e.g. deletes, background scripts) |
+| `E_PAUSED` | 423 | The user paused agent access in the ScriptSync helper tab. Stop and tell the user — do not retry until they press Resume agents there |
 | `E_PARTIAL_FAILURE` | 207 | Batch partially succeeded — inspect per-item results |
+| `E_REVIEW_PENDING` | 202 | The command needs human approval in the helper tab Review Queue. **Tell the user to approve it** in the SN Utils ScriptSync helper tab in their browser, then call `get_review_result` with the `reviewId` from `details` to collect the outcome |
+| `E_USER_REJECTED` | 403 | The developer rejected the command in the Review Queue — do not retry without asking the user |
 | `E_INTERNAL` | 500 | Unexpected error |
 | `E_ACL` / `E_TOKEN_EXPIRED` / `E_SCREENSHOT_PERMISSION` | 502 | ServiceNow rejected the request, or a tab needs a one-time capture grant (click the SN Utils icon on it, then retry) |
 | `E_SERVER_NOT_RUNNING` / `E_BROWSER_DISCONNECTED` | 503 | Can't reach ServiceNow |
@@ -174,186 +164,9 @@ If `list_instances` isn't available (older extension), fall back to reading the
 `<instance>/_settings.json` mtimes yourself and applying the same rule. Once
 resolved, reuse that `instance` for the rest of the session.
 
-### Finding the right server when you don't know the root folder
+## Transport: HTTP only
 
-Everything above assumes you already know which sync folder (and therefore
-which port file) to read. If you don't — e.g. you were asked to "query X from
-instance Y" with no path context — check the **global server registry**
-before hunting for `_settings.json` files across the filesystem:
-
-**`~/.sn-scriptsync/servers.json`** — a per-machine index of every currently
-running sn-scriptsync server (the VS Code extension or the standalone
-headless host), refreshed on startup/shutdown and whenever a not-yet-seen
-instance is discovered:
-
-```json
-[
-  {
-    "root": "/Users/you/project-a",
-    "pid": 50761,
-    "httpPort": 63628,
-    "wsPort": 1978,
-    "portFilePath": "/Users/you/project-a/.sn-scriptsync/agent-port.json",
-    "instances": [{ "name": "surfcddev", "url": "https://surfcddev.service-now.com" }],
-    "startedAt": 1785896313788
-  }
-]
-```
-
-1. Read `~/.sn-scriptsync/servers.json`. Missing or empty means no sn-scriptsync
-   server is running anywhere on this machine right now — fall back to
-   whatever sync-folder context you already have.
-2. Filter entries whose `instances[].name` matches the instance you need. If
-   more than one server claims the same instance name, or none do, don't
-   guess — confirm with the user; that's an unusual state worth surfacing,
-   not silently picking one.
-3. Read `portFilePath` from the matched entry — it's the *same* per-root port
-   file "Required discovery algorithm" above describes. Apply the *same*
-   trust check on it: `GET /api/health`, confirm `health.pid` matches,
-   confirm `health.apiVersion` is supported. The registry only narrows down
-   *which file to read* — it never replaces that check, since the registry
-   itself is a best-effort discovery convenience, not an authenticated
-   source of truth (and deliberately doesn't carry the token — only a
-   pointer to where the real, per-root port/token file lives).
-4. `instances` is a snapshot, not continuously live — refreshed at server
-   startup and whenever a brand-new instance first connects, not on every
-   request. If your target instance isn't listed yet, it may just not have
-   synced/connected since that server started; a live `list_instances` call
-   against a candidate server is the ground truth if the registry comes up
-   empty for something you expect to exist.
-
-Never write to this file yourself — it's entirely server-managed.
-
-## Transport 2: File (legacy fallback)
-
-If the HTTP transport is unavailable (container without localhost access, old agent tooling, etc.), the extension still watches `{instance_folder}/agent/requests/*.json`. Drop a request file, poll `{instance_folder}/agent/responses/res_<id>.json`, then clean up. See the Legacy File API section below for examples.
-
-You can disable the file fallback once all your tooling is on HTTP:
-
-```
-"sn-scriptsync.agentApi.fileFallback": false
-```
-
-## Legacy File-Based Agent API
-
-Kept for backward compatibility. Prefer the HTTP transport above.
-
-### How to Use
-
-### 1. Send a Request
-Create a uniquely-named file in `{instance_folder}/agent/requests/`:
-
-```bash
-# File: {instance_folder}/agent/requests/req_abc123.json
-```
-
-```json
-{
-  "id": "abc123",
-  "command": "command_name",
-  "params": { },
-  "timestamp": 1733567890
-}
-```
-
-### 2. Wait for Response
-The extension responds **instantly** (typically <100ms). Check for `res_abc123.json`:
-
-**Optimized polling pattern:**
-```bash
-# Unix/macOS/Linux
-RESPONSE_FILE="agent/responses/res_abc123.json"
-while [ ! -f "$RESPONSE_FILE" ]; do sleep 0.1; done
-cat "$RESPONSE_FILE"
-
-# Windows (PowerShell)
-$file = "agent/responses/res_abc123.json"
-while (!(Test-Path $file)) { Start-Sleep -Milliseconds 100 }
-Get-Content $file
-```
-
-**Or use file system watcher** (if available):
-```bash
-# macOS with fswatch: fswatch -1 agent/responses/res_abc123.json
-# Linux with inotifywait: inotifywait -e create agent/responses/
-```
-
-**Response format:**
-```json
-{
-  "id": "abc123",
-  "command": "command_name",
-  "status": "success",
-  "result": { },
-  "timestamp": 1733567891,
-  "appName": "Cursor"
-}
-```
-
-### 3. Cleanup
-After processing the response, **delete both files**:
-```bash
-# Unix/macOS/Linux
-rm agent/requests/req_abc123.json agent/responses/res_abc123.json
-
-# Windows (PowerShell)
-Remove-Item agent/requests/req_abc123.json,agent/responses/res_abc123.json
-
-# Windows (CMD)
-del agent\requests\req_abc123.json agent\responses\res_abc123.json
-```
-
-**Benefits:**
-- ✅ **Instant responses** - extension processes immediately (no queue delays)
-- ✅ **Parallel requests** - multiple requests can be in-flight simultaneously
-- ✅ **No file conflicts** - each request gets its own unique files
-- ✅ **App identification** - `appName` property shows which editor responded
-
----
-
-### Complete Example (Unix/macOS/Linux)
-
-```bash
-# 1. Create request
-cat > agent/requests/req_conn1.json << 'EOF'
-{
-  "id": "conn1",
-  "command": "check_connection"
-}
-EOF
-
-# 2. Wait for response (optimized polling)
-while [ ! -f agent/responses/res_conn1.json ]; do sleep 0.1; done
-
-# 3. Read response
-cat agent/responses/res_conn1.json
-# Output: {"id":"conn1","status":"success","result":{"ready":true},"appName":"Cursor"}
-
-# 4. Cleanup
-rm agent/requests/req_conn1.json agent/responses/res_conn1.json
-```
-
-### Complete Example (Windows PowerShell)
-
-```powershell
-# 1. Create request
-@"
-{
-  "id": "conn1",
-  "command": "check_connection"
-}
-"@ | Out-File -FilePath agent/requests/req_conn1.json -Encoding utf8
-
-# 2. Wait for response (optimized polling)
-while (!(Test-Path agent/responses/res_conn1.json)) { Start-Sleep -Milliseconds 100 }
-
-# 3. Read response
-Get-Content agent/responses/res_conn1.json
-# Output: {"id":"conn1","status":"success","result":{"ready":true},"appName":"Cursor"}
-
-# 4. Cleanup
-Remove-Item agent/requests/req_conn1.json,agent/responses/res_conn1.json
-```
+The legacy file-based transport (`{instance_folder}/agent/requests/*.json`) was removed in 4.8.0. Every agent flow uses the HTTP Agent API above; if a request file is dropped in the workspace nothing will pick it up.
 
 ## Commands
 
@@ -373,11 +186,17 @@ Verify WebSocket server is running and browser helper tab is connected. **Always
     "ready": true,
     "serverRunning": true,
     "browserConnected": true,
-    "clientCount": 1,
-    "message": "Connected and ready"
+    "message": "Connected and ready",
+    "helper": { "debuggerAvailable": false, "tier": "pro", "proFeatures": true }
   }
 }
 ```
+
+**`helper` tells you which SN Utils build is connected.** `debuggerAvailable` is true only on the SN Utils Debug edition; most users run the regular build. You don't need this to take screenshots (`take_screenshot` auto-routes to the best available path), but it tells you what else this session can do:
+
+- `debuggerAvailable: false` → explicit debugger commands (`capture_full_page`, network/console capture, dialog handling) will return `E_CDP_UNAVAILABLE`, and a screenshot on an ungranted tab will require the user's one-time icon click.
+- `debuggerAvailable: true` + `proFeatures: true` → full-page/element captures and network/console/dialog debugging are available (subject to the `browserDebugger` gate — see `get_capabilities`), and screenshots never need a permission click.
+- `helper: null` → the handshake hasn't arrived yet (or the license lookup failed); retry or fall back to `get_capabilities` for the authoritative, browser-verified view.
 
 **Response (server not running):**
 ```json
@@ -407,8 +226,8 @@ Verify WebSocket server is running and browser helper tab is connected. **Always
 }
 ```
 
-### `get_capabilities` ⚡ (preflight Pro / debugger / settings gates)
-Ask the connected SN Utils helper tab what it can do **right now** — the license tier, whether the Chrome DevTools Protocol **browser debugger** (network/console capture, full-page screenshots, native dialog handling) is usable, and the **`gates`** block telling you which write/create/delete/script permissions are enabled. Call this once up front so you can preflight `E_DISABLED` instead of discovering it mid-operation, and before reaching for the `snu-browser-debug` skill instead of firing a CDP command and parsing the error.
+### `get_capabilities` ⚡ (preflight Pro / debugger / security gates)
+Ask the connected SN Utils helper tab what it can do **right now** — the Agent API version, the license tier, whether the Chrome DevTools Protocol **browser debugger** (network/console capture, full-page screenshots, native dialog handling) is usable, which protocol **`capabilities`** the helper supports (two-phase command review, per-instance security gates), and the per-instance **`instanceGates`** snapshots. Call this once up front so you can preflight `E_DISABLED` instead of discovering it mid-operation, and before reaching for the `snu-browser-debug` skill instead of firing a CDP command and parsing the error.
 
 Requires a connected helper tab (`E_BROWSER_DISCONNECTED` otherwise — run `check_connection` first).
 
@@ -417,58 +236,78 @@ Requires a connected helper tab (`E_BROWSER_DISCONNECTED` otherwise — run `che
 { "id": "cap_1", "command": "get_capabilities" }
 ```
 
-**Response (Pro, debugger usable):**
+**Response (v8 helper with per-instance gates):**
 ```json
 {
   "status": "success",
   "result": {
+    "apiVersion": 8,
     "tier": "pro",
     "proFeatures": true,
     "cdp": { "available": true, "reason": null },
-    "gates": {
-      "createArtifacts": true,
-      "restRequest": false,
-      "deleteRecords": false,
-      "backgroundScripts": false,
-      "browserDebugger": true,
-      "fileFallback": true
+    "capabilities": { "protocolVersion": 1, "commandReview": 1, "instanceSecurityGates": 1 },
+    "instanceGates": {
+      "https://example.service-now.com": {
+        "revision": 3,
+        "gates": {
+          "backgroundScripts": "approve",
+          "deleteRecords": "off",
+          "createArtifacts": "auto",
+          "browserDebugger": "off",
+          "restRequest": "auto"
+        }
+      }
     }
   }
 }
 ```
 
-**Response (browser debugger not enabled — the default):**
+**Response (older SN Utils build — no review protocol):**
 ```json
 {
   "status": "success",
   "result": {
+    "apiVersion": 8,
     "tier": "pro",
     "proFeatures": true,
-    "cdp": { "available": false, "reason": "E_DISABLED" },
-    "gates": {
-      "createArtifacts": true,
-      "restRequest": false,
-      "deleteRecords": false,
-      "backgroundScripts": false,
-      "browserDebugger": false,
-      "fileFallback": true
-    }
+    "cdp": { "available": false, "reason": "E_CDP_UNAVAILABLE" },
+    "capabilities": { "protocolVersion": 1 },
+    "instanceGates": {}
   }
 }
 ```
 
 - `tier` — `community` | `pro` | `trial` | `enterprise` (license of the connected helper tab).
 - `proFeatures` — `true` when the tier unlocks Pro features (e.g. `code_search`).
-- `cdp.available` — `true` only when the browser debugger is enabled (`sn-scriptsync.browserDebugger.enabled`) **and** the debugger adapter is present (Pro build) **and** the license is Pro/Trial/Enterprise.
-- `cdp.reason` — when `available` is `false`, the code you would otherwise have hit: `E_DISABLED` (debugger off — enable `sn-scriptsync.browserDebugger.enabled`), `E_CDP_UNAVAILABLE` (Community build / no debugger adapter) or `E_PRO_REQUIRED` (adapter present but license isn't Pro).
-- `gates` — the VS Code settings that produce `E_DISABLED`, so you can preflight before calling a gated command:
-  - `createArtifacts` — `create_artifact`, `create_application`, `create_table`, `add_column` (default **on**).
-  - `restRequest` — POST/PUT/PATCH via `rest_request` (default off).
-  - `deleteRecords` — `delete_record`, DELETE via `rest_request`, delete UI verbs in `run_ui_action` (default off).
-  - `backgroundScripts` — `run_background_script` and the `delete_application` cascade (default off).
-  - `browserDebugger` — the CDP browser debugger (default off); same flag reflected in `cdp.available`.
-  - `fileFallback` — legacy file-based transport (`agent/requests/*.json`) is active alongside HTTP (default on).
-- When a gate is `false`, tell the user exactly which setting to enable (e.g. `sn-scriptsync.deleteRecords.enabled`) rather than retrying.
+- `cdp.available` — `true` only when the debugger adapter is present (Debug edition build) **and** the license is Pro/Trial/Enterprise.
+- `cdp.reason` — when `available` is `false`, the code you would otherwise have hit: `E_CDP_UNAVAILABLE` (Community build / no debugger adapter) or `E_PRO_REQUIRED` (adapter present but license isn't Pro).
+- `capabilities` — what the connected helper's protocol supports. `commandReview: 1` means high-risk commands (`run_background_script`, `delete_record`, destructive `run_ui_action`, `delete_application`) go through the helper-tab **Review Queue**: expect `E_REVIEW_PENDING`, then collect the outcome with `get_review_result`. When `commandReview` is absent the helper is an older SN Utils build: those commands run directly and are gated by the `sn-scriptsync.*.enabled` VS Code settings instead.
+- `instanceGates` — per-instance tri-state grants keyed by instance origin, published only by helpers with `instanceSecurityGates: 1`. `off` refuses the command (`E_DISABLED`), `auto` runs it without review, `approve` routes it through the Review Queue. A gate that is missing for an instance counts as `off` (deny-wins). Checking gates up front lets you warn the user *before* issuing a command that will need their approval.
+- When a command is refused with `E_DISABLED`, relay the error message to the user (it names the helper-tab gate or the VS Code setting to enable) rather than retrying.
+
+### `get_review_result` (collect a human-review outcome)
+
+Guarded commands (background scripts, deletes, some UI actions) whose per-instance gate is set to **Approve** don't execute immediately: the command returns `E_REVIEW_PENDING` right away with a `reviewId`, and the actual request waits in the SN Utils helper tab **Review Queue** for the developer to approve or reject (5-minute window). The helper tab announces the pending review itself (sound, favicon flash, Review Queue badge).
+
+**When you receive `E_REVIEW_PENDING`: tell the user to approve the request in the SN Utils ScriptSync helper tab in their browser, then call this command to collect the outcome.** Long-polls up to `waitSeconds` (default 30, max 55) per call; poll again while it keeps returning `E_REVIEW_PENDING`.
+
+**Request:**
+```json
+{ "id": "revres_1", "command": "get_review_result", "params": { "reviewId": "rev_1786...._ab12cd", "waitSeconds": 30 } }
+```
+
+**Response (approved & executed):** the original command's result, e.g. for `run_background_script`:
+```json
+{ "status": "success", "result": { "reviewId": "rev_....", "command": "run_background_script", "output": "*** Script: ..." } }
+```
+
+**Errors:**
+- `E_REVIEW_PENDING` — still undecided; remind the user and poll again.
+- `E_USER_REJECTED` — the developer rejected it; don't retry without asking.
+- `E_TIMEOUT` — the 5-minute review window expired unanswered; re-issue the original command to start a new review.
+- `E_NOT_FOUND` — unknown/expired `reviewId` (settled results are kept ~10 minutes).
+
+> Prefer this two-phase flow. If you genuinely need the old blocking behavior (the original call holding open until the decision), pass `"awaitReview": true` in the original command's `params` — but note most HTTP clients time out long before the 5-minute window.
 
 ### `list_instances`
 List every instance in the workspace with its URL and per-instance activity
@@ -637,41 +476,6 @@ Clear the last error file.
 }
 ```
 
-### `refresh_scope` ⚡
-Reset every locally synced file in a scope back to the instance's current values — a drift-guard/reset ritual for when local files may have diverged from the instance (or before starting work, to guarantee a clean baseline). This overwrites local files with instance content; it never writes to the instance.
-
-**Request:**
-```json
-{ "id": "rs1", "command": "refresh_scope", "params": { "scopeName": "x_app_scope" } }
-```
-
-**Parameters:**
-- `scopeName` (optional): the scope's folder name under the instance (e.g. `"global"` or your app's folder name). Omit it when the instance has exactly one scope folder — it's inferred automatically; with more than one, `scopeName` is required (`E_INVALID_PARAMS` lists the candidates).
-- `includeEmpty` (optional, default `false`): also write empty code fields to disk, matching the VS Code "Load/Refresh artifacts from scope (include empty)" variant. Off by default to avoid creating empty noise files for unused fields.
-
-**Response:**
-```json
-{
-  "status": "success",
-  "result": {
-    "scopeName": "x_app_scope",
-    "scope": "x_app_scope",
-    "tablesRefreshed": 2,
-    "filesWritten": 7,
-    "tables": [
-      { "table": "sys_script_include", "records": 4, "filesWritten": 4 },
-      { "table": "sp_widget", "records": 1, "filesWritten": 3 }
-    ]
-  }
-}
-```
-
-**Notes:**
-- Two-stage round trip through the browser session: first lists every record `sys_metadata` reports in the scope, then fetches the real field content for every table sn-scriptsync tracks a code field on (Script Includes' `script`, widgets' `template`/`css`/`client_script`/etc., ...) — all tables fetched concurrently — and overwrites the corresponding local file(s) for each.
-- If a table returns nothing (no code-bearing tables found in the scope at all), the response reports `tablesRefreshed: 0` with an explanatory `message` and no error.
-- Both the scope listing and each table's field fetch are paginated (1000/page and 200/page respectively) rather than capped at a single request, up to a 50,000/20,000-record safety ceiling per scope/table. If a ceiling is hit, the response includes `scopeListingTruncated: true` and/or a `truncatedTables` array — treat the refresh as partial and use `query_records`/`get_record` to fill in what's missing.
-- Unknown `scopeName` (no matching entry in the instance's `scopes.json`) fails with `E_INSTANCE_NOT_FOUND` — sync at least one file from that scope via VS Code first so `scopes.json` gets populated, or pass the scope's internal name directly.
-
 ### `update_record`
 
 Update a single field on an existing record. Fire-and-forget (the extension sends the update through the helper tab; success is reported back asynchronously).
@@ -770,6 +574,54 @@ Update multiple fields on the same record in one round-trip. Preferred for multi
 - `E_INVALID_PARAMS` - missing sys_id/table/fields, or `fields` object is empty
 - `E_BROWSER_DISCONNECTED` - no helper tab available
 - `E_INSTANCE_NOT_FOUND` - `_settings.json` missing
+
+### `create_record`
+
+Insert a plain data row on any table: an incident, task, `sys_user`, `sys_user_group`, `cmdb_ci`, catalog request — anything whose display field is not `name`.
+
+Use `create_artifact` instead for scriptable artifacts (Script Include, Business Rule, widget): it also tracks the new record in the local workspace and its `_map.json`.
+
+**Gating:** `createArtifacts` (`sn-scriptsync.createArtifacts.enabled` in VS Code, `SNU_ALLOW_CREATE_ARTIFACTS` in the standalone `snu` host) — the same permission as the other `create_*` commands, **on by default**.
+
+**Request:**
+```json
+{
+  "id": "crec_1",
+  "command": "create_record",
+  "params": {
+    "table": "incident",
+    "fields": { "short_description": "Printer on 3rd floor is down", "urgency": "2" }
+  }
+}
+```
+
+**Parameters:**
+- `table` (required): target table name.
+- `fields` (required): field-value dictionary, at least one entry. Use raw values (a `sys_id` for reference fields, the choice *value* for choice fields), not display labels.
+
+**Response:**
+```json
+{
+  "status": "success",
+  "result": {
+    "created": true,
+    "table": "incident",
+    "sys_id": "b1c2...",
+    "name": "INC0010001",
+    "record": { "...": "..." }
+  }
+}
+```
+
+`record` is the inserted row as ServiceNow returned it, so the write is already verified — no follow-up `get_record` is needed unless you want fields the insert did not return. `name` is the best available display handle (`number`, then `name`, `sys_name`, `short_description`).
+
+**Errors:**
+- `E_INVALID_PARAMS` — missing/invalid `table`, or an empty `fields` payload.
+- `E_DISABLED` — the `createArtifacts` gate is off.
+- `E_ACL` — the session may not insert on that table.
+- `E_REFERENCE_INTEGRITY` — a reference field points at a record that does not exist.
+
+**Do not create records by driving the form UI** (`navigate` + `set_field` + `run_ui_action`). Those commands exist to exercise real form behaviour (client scripts, UI policies) and to show the user something on screen. As a way to write data they are slow, silently lossy, and leave half-filled forms behind when a step fails.
 
 ### `create_artifact` ⚡ (RECOMMENDED FOR AI AGENTS)
 Create a new artifact directly via payload. **This is the preferred method for AI agents** - no file creation needed, executes immediately (not queued).
@@ -1166,6 +1018,77 @@ Check if an artifact exists in ServiceNow (queries the actual instance, not just
 }
 ```
 
+### `pull_records` (alias: `pull_artifacts`)
+
+Pull records from ServiceNow and store their code fields into canonical local workspace files (`<instance>/<scope>/<table>/<name>.<field>.<ext>` or `<table>/<name>/<field>.<ext>` for folder-record tables) with automatic `_map.json` registration.
+
+> **Key Advantage**: Agents call this command over HTTP (port 1977) and never compete for the WebSocket client; the existing SN Utils helper tab remains connected and is required to fulfill the request via the authenticated session.
+
+**Request:**
+```json
+{
+  "id": "pull_1",
+  "command": "pull_records",
+  "params": {
+    "table": "sys_script_include",
+    "query": "nameSTARTSWITHincident^active=true",
+    "limit": 10,
+    "openFiles": false
+  }
+}
+```
+
+**Parameters:**
+- `table` (required, string): ServiceNow table name (e.g. `sys_script_include`, `sys_script`, `sp_widget`). Must be alphanumeric/underscores.
+- `query` (optional, string): ServiceNow encoded query string.
+- `sys_id` (optional, string): Single 32-character hex sys_id (or `'global'`). Combined with `query` using `^` (AND).
+- `sys_ids` (optional, string[]): Array of 32-character hex sys_ids. Combined with `query` using `^` (AND).
+- `fields` (optional, string[] | string): Custom code fields to pull. If omitted, fields and file extensions are automatically discovered from table metadata (e.g. `script` for `sys_script`, `template`/`client_script`/`css`/`script` for `sp_widget`).
+- `limit` (optional, integer): Max records to pull (`1` to `500`, default: `50`). Values outside this range return `E_INVALID_PARAMS`.
+- `openFiles` (optional, boolean): Whether to open each written file in active VS Code editor tabs (default: `false` to avoid tab spam).
+
+**Response:**
+```json
+{
+  "status": "success",
+  "result": {
+    "table": "sys_script_include",
+    "matchedRecords": 2,
+    "pulledRecords": 2,
+    "filesWritten": 2,
+    "skippedEmpty": 0,
+    "warnings": [],
+    "records": [
+      {
+        "sys_id": "9659b9900a0a0b340079eb7c8a410eb8",
+        "name": "IncidentUtils",
+        "scope": "global",
+        "files": [
+          {
+            "field": "script",
+            "path": "dev12345/global/sys_script_include/IncidentUtils.script.js",
+            "bytes": 1420,
+            "action": "updated"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**Behavior & Rules:**
+- **`_map.json` tracking**: Maintains `<instance>/<scope>/<table>/_map.json`. If a record was previously pulled, its existing mapped name is preserved. Name collisions receive a `"-XXXX"` sys_id suffix.
+- **Folder record tables**: Tables in `FOLDERRECORDTABLES` (such as `sp_widget`, `sp_header_footer`, `sys_ui_page`) are stored in subfolders (`sp_widget/<name>/template.html`, `client_script.js`, `css.scss`, `script.js`).
+- **Empty remote fields**: If a remote field has no content and a local file already exists, the local file is cleared (action: `cleared`) to prevent stale code. If no local file exists, it is skipped (action: `skipped_empty`).
+- **Self-write protection**: Every written file is marked as a self-write to prevent the file watcher from triggering an unnecessary sync-back loop to ServiceNow.
+
+**Errors:**
+- `E_INVALID_PARAMS` — invalid table name, invalid sys_id format, or `limit` out of range `[1, 500]`.
+- `E_BROWSER_DISCONNECTED` — the SN Utils helper tab is not connected.
+- `E_PAUSED` — agent commands are paused in the SN Utils helper tab.
+- `E_COMMAND_FAILED` — ServiceNow Table API query failed.
+
 ### `query_records` ⚡
 Execute an arbitrary encoded query against any ServiceNow table. Use this to fetch data, check conditions, or explore records.
 
@@ -1230,6 +1153,7 @@ Execute an arbitrary encoded query against any ServiceNow table. Use this to fet
 - `=` equals
 - `!=` not equals
 - `LIKE` contains
+- `NOT LIKE` does not contain (the space is required)
 - `STARTSWITH` starts with
 - `ENDSWITH` ends with
 - `>` greater than
@@ -1237,7 +1161,7 @@ Execute an arbitrary encoded query against any ServiceNow table. Use this to fet
 - `>=` greater or equal
 - `<=` less or equal
 - `IN` in list (comma-separated)
-- `NOTIN` not in list
+- `NOT IN` not in list (comma-separated; the space is required)
 - `ISEMPTY` is empty
 - `ISNOTEMPTY` is not empty
 - `^` AND
@@ -1377,8 +1301,10 @@ Make an arbitrary ServiceNow REST call through the connected browser session (re
 
 **Gating:**
 - `GET` — always allowed.
-- `POST` / `PUT` / `PATCH` — require `sn-scriptsync.restRequest.enabled`.
-- `DELETE` — requires `sn-scriptsync.deleteRecords.enabled`.
+- `POST` / `PUT` / `PATCH` — require `sn-scriptsync.restRequest.enabled` (VS Code) or `SNU_ALLOW_REST_REQUEST=1` (standalone `snu` host).
+- `DELETE` — requires `sn-scriptsync.deleteRecords.enabled` (VS Code) or `SNU_ALLOW_DELETE_RECORDS=1` (standalone `snu` host).
+
+Both hosts implement this command. Over MCP it is also reachable as the `snu_rest_request` tool, and a plain record insert has a dedicated wrapper, `snu_create_record`, that returns the inserted record instead of a raw HTTP envelope.
 
 **Request:**
 ```json
@@ -1431,7 +1357,10 @@ Execute a server-side background script (`/sys.scripts.do`) on the instance and 
 ```
 
 **Errors:**
-- `E_DISABLED` — `sn-scriptsync.backgroundScripts.enabled` is off.
+- `E_DISABLED` — `sn-scriptsync.backgroundScripts.enabled` is off, or the instance gate is set to Off in the helper tab.
+- `E_REVIEW_PENDING` — the instance gate is set to Approve: the script is waiting in the helper tab Review Queue. Tell the user to approve it in the SN Utils ScriptSync helper tab in their browser, then collect the output with `get_review_result`.
+- `E_USER_REJECTED` — the developer rejected the script in the Review Queue; don't retry without asking.
+- `E_UNAUTHORIZED` — the instance answered "not authorized" (session lost, or the user can't run background scripts); the helper refreshes the session token and retries once before raising this.
 - `E_INVALID_PARAMS` — missing `script`.
 
 > The pragmatic escape hatch for bulk data fixes that the typed commands don't cover. Output is whatever `/sys.scripts.do` returns (the `gs.print` lines plus the server's evaluation log).
@@ -1652,12 +1581,15 @@ Refresh browser tabs showing the artifact preview. Useful after updating a widge
 **Note:** This refreshes ALL browser tabs matching the widget's preview URLs, plus the active tab if it's on the same instance.
 
 ### `take_screenshot` ⚡ (Remote - Async)
-Take a screenshot of a ServiceNow page. Requires explicit user action on first use.
+Take a screenshot of a ServiceNow page. The browser picks the best capture path it actually has — no capability juggling needed on your side:
 
-**⚠️ IMPORTANT: Permission Required**
-- **First screenshot**: User must click the SN Utils extension icon on the target tab to grant permission
-- **Subsequent screenshots**: Will reuse the same tab without re-approval (when possible)
-- If permission is denied, the response will include an error message guiding the user
+1. **activeTab** (tab already granted): captures directly, as always.
+2. **Chrome debugger**: when the grant is missing and the connected build supports it (Debug edition + Pro + `sn-scriptsync.browserDebugger.enabled`), the browser captures via the debugger instead — no user action, just a brief flash of Chrome's debugger banner. The result carries `"capturedVia": "debugger"`.
+3. **Ask the user**: only when neither path works does `E_SCREENSHOT_PERMISSION` surface — the user must click the SN Utils extension icon on the target tab, and a retry is built in (see below).
+
+**Permission notes (regular build — most users):**
+- **First screenshot**: user must click the SN Utils extension icon on the target tab to grant permission
+- **Subsequent screenshots**: reuse the same tab without re-approval (when possible)
 
 **Request:**
 ```json
@@ -1688,10 +1620,13 @@ Take a screenshot of a ServiceNow page. Requires explicit user action on first u
     "filePath": "/workspace/screenshots/screenshot_2024-12-09T14-00-00.png",
     "fileName": "screenshot_2024-12-09T14-00-00.png",
     "url": "https://instance.service-now.com/sp?id=my_widget",
-    "tabTitle": "My Widget - ServiceNow"
+    "tabTitle": "My Widget - ServiceNow",
+    "capturedVia": "activeTab"
   }
 }
 ```
+
+`capturedVia` is `"activeTab"` or `"debugger"` — which path actually produced the image.
 
 **Response (permission needed):**
 ```json
@@ -1704,7 +1639,7 @@ Take a screenshot of a ServiceNow page. Requires explicit user action on first u
 }
 ```
 
-The extension auto-retries once (~1.5s) after a permission error before surfacing `E_SCREENSHOT_PERMISSION`, giving you a moment to click the extension icon. The retry stays pinned to the tab selected by the first attempt so a ServiceNow redirect cannot open duplicate tabs.
+The extension auto-retries once (~10s) after a permission error before surfacing `E_SCREENSHOT_PERMISSION`, giving the user time to click the extension icon — so a "slow" screenshot call usually means the grant flow is in progress, not a hang. The retry stays pinned to the tab selected by the first attempt so a ServiceNow redirect cannot open duplicate tabs.
 
 **Use cases:**
 - Capture widget preview for visual verification
@@ -1718,7 +1653,7 @@ The extension auto-retries once (~1.5s) after a permission error before surfacin
 4. If no matching tab is found, a new tab will be opened
 
 **Handling permission errors:**
-When receiving a permission error, inform the user they need to click the SN Utils extension icon, then retry the screenshot command.
+If `E_SCREENSHOT_PERMISSION` surfaces, the debugger route was already tried or isn't available — inform the user they need to click the SN Utils extension icon, then retry the screenshot command. (If the error's details say `cdpFallbackAvailable: true`, the build could do debugger captures but the user hasn't enabled `sn-scriptsync.browserDebugger.enabled` — you can mention that as an alternative.)
 
 ### `navigate_and_screenshot`
 
@@ -1741,11 +1676,13 @@ Open/activate a URL, wait for it to finish loading, settle briefly, then screens
 
 **Response:**
 ```json
-{ "status": "success", "result": { "saved": true, "filePath": ".../screenshots/screenshot_....png", "tabId": 42, "navigated": true } }
+{ "status": "success", "result": { "saved": true, "filePath": ".../screenshots/screenshot_....png", "tabId": 42, "url": "https://dev.service-now.com/incident.do?sys_id=-1", "tabTitle": "Incident | ServiceNow", "navigated": true } }
 ```
 
+Verify `url`/`tabTitle` match the page you intended — cheaper than rendering the image.
+
 **Errors:**
-- `E_SCREENSHOT_PERMISSION` — the browser could not capture the tab (not capturable / permission).
+- `E_SCREENSHOT_PERMISSION` — the browser could not capture the tab. Navigation has already happened at that point, so the target page is on screen; the same capture routing and recovery as `take_screenshot` applies (debugger path when available, then a ~10s icon-click retry window).
 - `E_INVALID_PARAMS` — missing `url`.
 
 ### `run_slash_command` ⚡ (Remote - Async)
