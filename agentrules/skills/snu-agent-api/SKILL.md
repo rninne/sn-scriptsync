@@ -3,7 +3,7 @@ name: snu-agent-api
 description: SN ScriptSync HTTP/file Agent API: endpoint discovery, auth, the full error-code table, and the complete command catalog (query_records, get_record, update_record, create_artifact, create_application, rest_request, screenshots, etc.). Read this before calling any Agent API command.
 ---
 
-<!-- SN-SCRIPTSYNC:SKILL apiVersion=21 -->
+<!-- SN-SCRIPTSYNC:SKILL instructionsSchemaVersion=24 -->
 
 # SN ScriptSync — Agent API
 
@@ -66,8 +66,29 @@ the port/token. Each session:
 
 ```bash
 curl -s http://127.0.0.1:$PORT/api/health
-# → { "status": "success", "apiVersion": 6, "commands": [...], "pid": 68861 }
 ```
+
+```json
+{
+  "status": "success",
+  "apiVersion": 6,
+  "commands": ["..."],
+  "pid": 68861,
+  "serverRunning": true,
+  "browserConnected": true,
+  "quickstart": [
+    { "step": 1, "command": "check_connection", "purpose": "Verify that the WS server is running and a browser tab is connected." },
+    { "step": 2, "command": "list_instances", "purpose": "List every instance folder in the workspace with its URL and per-instance activity freshness, plus a suggested default — purely local, no browser round-trip." },
+    { "step": 3, "command": "get_instance_info", "purpose": "Return the resolved instance name, connection flags, and per-instance activity freshness." }
+  ]
+}
+```
+
+`serverRunning`/`browserConnected` answer "is this actually working" — the WS bridge and
+the helper-tab connection — without an authenticated call. `quickstart` is a fixed,
+three-step bootstrap hint (not the full instance-resolution algorithm below, which stays
+here); each `purpose` is that command's own one-line summary, so it can't drift out of
+sync with the command's real docs.
 
 The extension deletes both port files when the server stops, but a crash or a sync
 conflict can leave a stale file behind — which is exactly why the `pid` cross-check
@@ -126,6 +147,7 @@ HTTP status codes map to codes:
 | `E_PARTIAL_FAILURE` | 207 | Batch partially succeeded — inspect per-item results |
 | `E_REVIEW_PENDING` | 202 | The command needs human approval in the helper tab Review Queue. **Tell the user to approve it** in the SN Utils ScriptSync helper tab in their browser, then call `get_review_result` with the `reviewId` from `details` to collect the outcome |
 | `E_USER_REJECTED` | 403 | The developer rejected the command in the Review Queue — do not retry without asking the user |
+| `E_COMMAND_FAILED` | 500 | The command was accepted (and, when applicable, approved) but failed during execution. Inspect `details.status`, `details.detail`, and `details.response`; this is not a user rejection |
 | `E_INTERNAL` | 500 | Unexpected error |
 | `E_ACL` / `E_TOKEN_EXPIRED` / `E_SCREENSHOT_PERMISSION` | 502 | ServiceNow rejected the request, or a tab needs a one-time capture grant (click the SN Utils icon on it, then retry) |
 | `E_SERVER_NOT_RUNNING` / `E_BROWSER_DISCONNECTED` | 503 | Can't reach ServiceNow |
@@ -133,11 +155,17 @@ HTTP status codes map to codes:
 
 ### Resolving `E_INSTANCE_REQUIRED` (multiple instances)
 
-When a command returns `E_INSTANCE_REQUIRED`, the workspace has more than one
-instance folder and you didn't pass `"instance"`. **A single helper tab relays
-for every instance the browser has a session for**, so more than one instance
-can answer as "live" — don't treat any single one as exclusive, and don't
-immediately ask the user to pick either.
+When a command returns `E_INSTANCE_REQUIRED`, you didn't pass `"instance"` and
+the bridge could not select a single safe target. `details.knownInstances` lists
+remembered workspace folders; `details.connectedInstances` lists the subset
+observed on the current helper connection. A folder is not proof of a live
+session. `auth_status` automatically selects the target only when exactly one
+known folder matches a helper-observed instance.
+
+If the error says `Multiple known workspace instances found`, do not describe
+those folders as active connections. If it says `Multiple helper-connected
+instances found`, ask for a target (especially for a write) or use the roster
+and freshness guidance below.
 
 Use freshness as a *default pick*, not an exclusivity test. The extension
 rewrites `<instance>/_settings.json` (refreshing `g_ck`) every time it relays for
@@ -163,6 +191,56 @@ ranking, and a suggested `defaultInstance`:
 If `list_instances` isn't available (older extension), fall back to reading the
 `<instance>/_settings.json` mtimes yourself and applying the same rule. Once
 resolved, reuse that `instance` for the rest of the session.
+
+### Finding the right server when you don't know the root folder
+
+Everything above assumes you already know which sync folder (and therefore
+which port file) to read. If you don't — e.g. you were asked to "query X from
+instance Y" with no path context — check the **global server registry**
+before hunting for `_settings.json` files across the filesystem:
+
+**`~/.sn-scriptsync/servers.json`** — a per-machine index of every currently
+running sn-scriptsync server (the VS Code extension or the standalone
+headless host), refreshed on startup/shutdown and whenever a not-yet-seen
+instance is discovered:
+
+```json
+[
+  {
+    "root": "/Users/you/project-a",
+    "pid": 50761,
+    "httpPort": 63628,
+    "wsPort": 1978,
+    "portFilePath": "/Users/you/project-a/.sn-scriptsync/agent-port.json",
+    "instances": [{ "name": "surfcddev", "url": "https://surfcddev.service-now.com" }],
+    "startedAt": 1785896313788
+  }
+]
+```
+
+1. Read `~/.sn-scriptsync/servers.json`. Missing or empty means no sn-scriptsync
+   server is running anywhere on this machine right now — fall back to
+   whatever sync-folder context you already have.
+2. Filter entries whose `instances[].name` matches the instance you need. If
+   more than one server claims the same instance name, or none do, don't
+   guess — confirm with the user; that's an unusual state worth surfacing,
+   not silently picking one.
+3. Read `portFilePath` from the matched entry — it's the *same* per-root port
+   file "Required discovery algorithm" above describes. Apply the *same*
+   trust check on it: `GET /api/health`, confirm `health.pid` matches,
+   confirm `health.apiVersion` is supported. The registry only narrows down
+   *which file to read* — it never replaces that check, since the registry
+   itself is a best-effort discovery convenience, not an authenticated
+   source of truth (and deliberately doesn't carry the token — only a
+   pointer to where the real, per-root port/token file lives).
+4. `instances` is a snapshot, not continuously live — refreshed at server
+   startup and whenever a brand-new instance first connects, not on every
+   request. If your target instance isn't listed yet, it may just not have
+   synced/connected since that server started; a live `list_instances` call
+   against a candidate server is the ground truth if the registry comes up
+   empty for something you expect to exist.
+
+Never write to this file yourself — it's entirely server-managed.
 
 ## Transport: HTTP only
 
@@ -304,6 +382,7 @@ Guarded commands (background scripts, deletes, some UI actions) whose per-instan
 **Errors:**
 - `E_REVIEW_PENDING` — still undecided; remind the user and poll again.
 - `E_USER_REJECTED` — the developer rejected it; don't retry without asking.
+- `E_COMMAND_FAILED` — the developer approved it, but execution failed; inspect `details.status`, `details.detail`, and `details.response` instead of treating this as a rejection.
 - `E_TIMEOUT` — the 5-minute review window expired unanswered; re-issue the original command to start a new review.
 - `E_NOT_FOUND` — unknown/expired `reviewId` (settled results are kept ~10 minutes).
 
@@ -476,11 +555,48 @@ Clear the last error file.
 }
 ```
 
+### `refresh_scope` ⚡
+Reset every locally synced file in a scope back to the instance's current values — a drift-guard/reset ritual for when local files may have diverged from the instance (or before starting work, to guarantee a clean baseline). This overwrites local files with instance content; it never writes to the instance.
+
+**Request:**
+```json
+{ "id": "rs1", "command": "refresh_scope", "params": { "scopeName": "x_app_scope" } }
+```
+
+**Parameters:**
+- `scopeName` (optional): the scope's folder name under the instance (e.g. `"global"` or your app's folder name). Omit it when the instance has exactly one scope folder — it's inferred automatically; with more than one, `scopeName` is required (`E_INVALID_PARAMS` lists the candidates).
+- `includeEmpty` (optional, default `false`): also write empty code fields to disk, matching the VS Code "Load/Refresh artifacts from scope (include empty)" variant. Off by default to avoid creating empty noise files for unused fields.
+
+**Response:**
+```json
+{
+  "status": "success",
+  "result": {
+    "scopeName": "x_app_scope",
+    "scope": "x_app_scope",
+    "tablesRefreshed": 2,
+    "filesWritten": 7,
+    "tables": [
+      { "table": "sys_script_include", "records": 4, "filesWritten": 4 },
+      { "table": "sp_widget", "records": 1, "filesWritten": 3 }
+    ]
+  }
+}
+```
+
+**Notes:**
+- Two-stage round trip through the browser session: first lists every record `sys_metadata` reports in the scope, then fetches the real field content for every table sn-scriptsync tracks a code field on (Script Includes' `script`, widgets' `template`/`css`/`client_script`/etc., ...) — all tables fetched concurrently — and overwrites the corresponding local file(s) for each.
+- If a table returns nothing (no code-bearing tables found in the scope at all), the response reports `tablesRefreshed: 0` with an explanatory `message` and no error.
+- Both the scope listing and each table's field fetch are paginated (1000/page and 200/page respectively) rather than capped at a single request, up to a 50,000/20,000-record safety ceiling per scope/table. If a ceiling is hit, the response includes `scopeListingTruncated: true` and/or a `truncatedTables` array — treat the refresh as partial and use `query_records`/`get_record` to fill in what's missing.
+- Unknown `scopeName` (no matching entry in the instance's `scopes.json`) fails with `E_INSTANCE_NOT_FOUND` — sync at least one file from that scope via VS Code first so `scopes.json` gets populated, or pass the scope's internal name directly.
+
 ### `update_record`
 
 Update a single field on an existing record. Fire-and-forget (the extension sends the update through the helper tab; success is reported back asynchronously).
 
 **Requires:** browser helper tab connected.
+
+**Gating:** `updateRecords` (`sn-scriptsync.updateRecords.enabled` in VS Code, `SNU_ALLOW_UPDATE_RECORDS` in the standalone `snu` host, or the per-instance **Update Records** grant in the SN Utils helper tab) — **on by default**. Where nothing sets it, it follows `createArtifacts`: a host or instance that may not create records may not overwrite them either.
 
 **Request:**
 ```json
@@ -523,6 +639,7 @@ Update a single field on an existing record. Fire-and-forget (the extension send
 
 **Errors:**
 - `E_INVALID_PARAMS` - missing sys_id/table/field/content
+- `E_DISABLED` - the `updateRecords` gate is off for this host or instance
 - `E_BROWSER_DISCONNECTED` - no helper tab available
 - `E_INSTANCE_NOT_FOUND` - `_settings.json` missing
 
@@ -531,6 +648,8 @@ Update a single field on an existing record. Fire-and-forget (the extension send
 Update multiple fields on the same record in one round-trip. Preferred for multi-file artifacts (widgets, UI pages) where you'd otherwise send many `update_record` calls.
 
 **Requires:** browser helper tab connected.
+
+**Gating:** `updateRecords` (`sn-scriptsync.updateRecords.enabled` in VS Code, `SNU_ALLOW_UPDATE_RECORDS` in the standalone `snu` host, or the per-instance **Update Records** grant in the SN Utils helper tab) — **on by default**. Where nothing sets it, it follows `createArtifacts`: a host or instance that may not create records may not overwrite them either.
 
 **Request:**
 ```json
@@ -572,6 +691,7 @@ Update multiple fields on the same record in one round-trip. Preferred for multi
 
 **Errors:**
 - `E_INVALID_PARAMS` - missing sys_id/table/fields, or `fields` object is empty
+- `E_DISABLED` - the `updateRecords` gate is off for this host or instance
 - `E_BROWSER_DISCONNECTED` - no helper tab available
 - `E_INSTANCE_NOT_FOUND` - `_settings.json` missing
 
@@ -2009,6 +2129,8 @@ Switch domain:
 
 ### `upload_attachment` ⚡ (Remote - Async)
 Upload a file (image, document, etc.) as an attachment to any ServiceNow record.
+
+**Gating:** `createArtifacts` (`sn-scriptsync.createArtifacts.enabled` in VS Code, `SNU_ALLOW_CREATE_ARTIFACTS` in the standalone `snu` host, or the per-instance grant in the SN Utils helper tab) — **on by default**. An upload inserts a `sys_attachment` row, so it carries the same permission as the other `create_*` commands and returns `E_DISABLED` when that permission is off.
 
 **Request (using filePath - recommended):**
 ```json
